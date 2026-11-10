@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>写方案智能体</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, 'Microsoft YaHei', sans-serif; background: #f5f7fa; color: #1f2937; }
+  header { background: #111827; color: #fff; padding: 16px 24px; font-size: 18px; font-weight: 600; }
+  header span { font-size: 12px; font-weight: 400; color: #9ca3af; margin-left: 12px; }
+  .wrap { display: flex; gap: 16px; padding: 16px 24px; align-items: flex-start; flex-wrap: wrap; }
+  .col { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; }
+  .col h3 { font-size: 14px; color: #374151; margin-bottom: 12px; }
+  .col-left { flex: 1 1 260px; min-width: 260px; }
+  .col-mid { flex: 1 1 340px; min-width: 340px; }
+  .col-right { flex: 1 1 420px; min-width: 420px; }
+  input, select, textarea { width: 100%; padding: 7px 9px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; margin-bottom: 8px; }
+  button { padding: 7px 14px; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; }
+  button:hover { background: #1d4ed8; }
+  button.ghost { background: #f3f4f6; color: #374151; }
+  .item { display: flex; align-items: center; padding: 6px 4px; border-bottom: 1px dashed #e5e7eb; font-size: 13px; gap: 6px; }
+  .item .item-title { flex: 1 1 auto; min-width: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .item-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+  .item .item-actions button { white-space: nowrap; padding: 2px 6px; font-size: 11px; }
+  .op-item { padding: 6px 2px; border-bottom: 1px dashed #e5e7eb; }
+  .op-head { display: flex; align-items: center; gap: 6px; }
+  .op-time { color: #9ca3af; font-size: 11px; flex: 0 0 auto; }
+  .op-tag { font-weight: 600; font-size: 11px; flex: 0 0 auto; }
+  .op-target { flex: 1 1 auto; min-width: 60px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #374151; font-size: 12px; }
+  .op-detail { font-size: 11.5px; color: #6b7280; margin-top: 2px; line-height: 1.5; word-break: break-all; }
+  .op-running { font-size: 11px; color: #b45309; flex: 0 0 auto; }
+  .op-dl { padding: 1px 8px !important; font-size: 11px !important; color: #2563eb; flex: 0 0 auto; }
+  .item.active { background: #eff6ff; font-weight: 600; }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-right: 6px; }
+  .tag.g { background: #dcfce7; color: #15803d; } .tag.p { background: #fef3c7; color: #b45309; } .tag.c { background: #dbeafe; color: #1d4ed8; }
+  .muted { color: #6b7280; font-size: 12px; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  #preview { white-space: pre-wrap; font-size: 12.5px; line-height: 1.6; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; max-height: 560px; overflow: auto; }
+  .doc-preview { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px 18px; max-height: 560px; overflow: auto; font-size: 12.5px; line-height: 1.75; color: #111827; white-space: normal; }
+  /* 与 Word/PDF 导出口径一致：标题靠字号+加粗+段前距分层，正文首行缩进两字 */
+  .doc-title { font-family: "方正小标宋简体", "宋体", serif; font-size: 22px; font-weight: 700; text-align: center; margin: 0 0 16px; line-height: 1.6; color: #000; }
+  .doc-stat { text-align: center; font-size: 12px; color: #6b7280; margin-bottom: 18px; }
+  .doc-h1 { font-family: "方正小标宋简体", "宋体", serif; font-size: 17px; font-weight: 700; text-align: center; margin: 20px 0 8px; color: #000; line-height: 1.6; }
+  .doc-h2 { font-family: "黑体", "微软雅黑", sans-serif; font-size: 15.5px; font-weight: 700; margin: 13px 0 5px; color: #000; line-height: 1.6; }
+  .doc-h3 { font-family: "仿宋_GB2312", "仿宋", serif; font-size: 14.5px; font-weight: 700; margin: 10px 0 4px; color: #000; line-height: 1.6; }
+  .doc-p { font-family: "仿宋_GB2312", "仿宋", serif; font-size: 14px; text-indent: 2em; margin: 0 0 3px; line-height: 1.8; color: #000; }
+  .doc-pending { font-family: "仿宋_GB2312", "仿宋", serif; font-size: 14px; text-indent: 2em; margin: 0 0 3px; line-height: 1.8; color: #9ca3af; font-style: italic; }
+  .doc-badge { font-size: 10px; font-weight: 400; color: #b45309; background: #fef3c7; border-radius: 3px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
+  .flash { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; padding: 8px 10px; border-radius: 6px; font-size: 12px; margin-top: 10px; }
+  .err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 8px 10px; border-radius: 6px; font-size: 12px; margin-top: 10px; }
+  .sub { font-size: 12px; color: #374151; margin-bottom: 6px; }
+  .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; display: none; align-items: center; justify-content: center; }
+  .modal { background: #fff; border-radius: 12px; width: 80%; max-width: 800px; max-height: 80vh; display: flex; flex-direction: column; }
+  .modal-header { padding: 16px 20px; border-bottom: 1px solid #e5e7eb; font-size: 16px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  .modal-body { padding: 20px; overflow: auto; font-size: 13px; line-height: 1.7; white-space: pre-wrap; background: #f9fafb; flex: 1; }
+  .modal-close { cursor: pointer; font-size: 20px; color: #6b7280; border: none; background: none; }
+  .step-item { padding: 8px 0; border-bottom: 1px dashed #e5e7eb; display: flex; align-items: center; gap: 10px; }
+  .step-icon { width: 20px; text-align: center; }
+  .step-title { font-weight: 500; }
+  .step-desc { font-size: 12px; color: #6b7280; margin-top: 2px; }
+</style>
+</head>
+<body>
+<header>写方案智能体<span>三级知识库（全局 / 项目 / 章节）· LangGraph 写作流 · Word/PDF 导出</span><em id="verTag" style="float:right;font-style:normal;font-size:11px;color:#9ca3af"></em></header>
+
+<div class="wrap">
+  <!-- 左：项目 -->
+  <div class="col col-left">
+    <h3>项目管理</h3>
+    <input id="projName" placeholder="项目名称，如 XX大学智慧校园">
+    <input id="projDesc" placeholder="项目简介（可选）">
+    <button onclick="createProject()">创建项目</button>
+    <div style="height:10px"></div>
+    <div class="sub" style="display:flex;align-items:center;justify-content:space-between">
+      <span>项目列表</span>
+      <label class="muted" style="font-size:11px;font-weight:400;display:flex;align-items:center;gap:4px;cursor:pointer">
+        <input type="checkbox" id="showArchived" onchange="loadProjects()" style="margin:0"> 显示已归档
+      </label>
+    </div>
+    <div id="projList"></div>
+  </div>
+
+  <!-- 中：章节 + 知识库 -->
+  <div class="col col-mid">
+    <h3>章节管理</h3>
+    <div id="curProj" class="muted">未选择项目</div>
+    <div class="btn-row" style="margin-bottom:8px">
+      <label class="ghost" style="padding:7px 14px;border-radius:6px;background:#f3f4f6;color:#374151;font-size:13px;cursor:pointer">
+        上传模板自动解析
+        <input type="file" id="templateFile" accept=".md,.docx,.pdf" style="display:none" onchange="uploadTemplate()">
+      </label>
+      <span class="muted" style="font-size:11px;align-self:center">支持 .md / .docx / .pdf</span>
+    </div>
+    <input id="chCode" placeholder="章节编号，如 03" style="width:90px;display:inline-block">
+    <input id="chTitle" placeholder="章节标题，如 技术架构方案" style="width:200px;display:inline-block">
+    <input id="chDesc" placeholder="章节要求（可空）">
+    <button onclick="addChapter()">手动添加章节</button>
+    <div id="batchBar" style="display:none;margin:8px 0;padding:6px 8px;background:#f3f4f6;border-radius:6px;font-size:12px;align-items:center;gap:8px">
+      <span id="batchCount" style="color:#374151">已选 0 个章节</span>
+      <button class="ghost" style="padding:2px 8px;font-size:11px" onclick="selectAllLeaves()">全选叶子章节</button>
+      <button class="ghost" style="padding:2px 8px;font-size:11px" onclick="clearSelection()">清空选择</button>
+      <button style="padding:3px 10px;font-size:11px" onclick="batchGenerate()" id="batchBtn">批量生成</button>
+      <button class="ghost" style="padding:2px 8px;font-size:11px;color:#dc2626;display:none" onclick="stopBatch()" id="batchStopBtn">停止</button>
+      <span id="batchProgress" style="color:#2563eb;font-size:11px"></span>
+    </div>
+    <div id="chList"></div>
+
+    <h3 style="margin-top:16px">知识库上传（三级）</h3>
+    <select id="tier" onchange="onTierChange()">
+      <option value="global">全局知识库（公司资质 / 方法论）</option>
+      <option value="project">项目知识库（RFP / 竞品 / 评审）</option>
+      <option value="chapter">章节知识库（当前章节参考）</option>
+    </select>
+    <div id="scopeSel" class="muted">上传到全局库，无需项目/章节上下文</div>
+    <div id="chapterTargetSel" style="display:none;margin-top:8px"></div>
+    <input type="file" id="files" multiple>
+    <button onclick="upload()">上传入库</button>
+    <div id="ingestMsg"></div>
+
+    <h3 style="margin-top:16px">知识库内容</h3>
+    <button class="ghost" style="width:100%;margin-bottom:8px" onclick="loadKbList()">刷新列表</button>
+    <div id="kbList" class="muted">暂无内容</div>
+  </div>
+
+  <!-- 右：生成 + 结果 -->
+  <div class="col col-right">
+    <h3>批量生成</h3>
+    <button onclick="generateAllChapters()" style="width:100%">生成全部章节</button>
+    <div class="muted" style="margin-top:4px">自动勾选本项目所有叶子章节，按顺序串行生成</div>
+    <div id="genMsg"></div>
+    <div id="dlRow" class="btn-row"></div>
+    <h3 style="margin-top:16px">方案全文预览（最终版）</h3>
+    <div id="frontPanel" style="margin-bottom:8px;border:1px solid #e5e7eb;border-radius:8px;padding:8px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <strong style="font-size:13px">前言 / 摘要</strong>
+        <span class="muted" id="frontState" style="font-size:12px">未填写，导出时不会有这两页（点「自动起草」才生成）</span>
+        <span style="flex:1"></span>
+        <button class="ghost" id="frontToggle" onclick="toggleFront()" style="font-size:12px;padding:3px 8px">展开编辑</button>
+      </div>
+      <div id="frontEdit" style="display:none;margin-top:8px">
+        <div class="muted" style="font-size:12px;margin-bottom:4px">前 言（叙述性文字，导出时排在摘要前）</div>
+        <textarea id="frontPreface" rows="6" style="width:100%;font-size:13px;line-height:1.6"
+          placeholder="留空则导出时不生成前言页"></textarea>
+        <div class="muted" style="font-size:12px;margin:8px 0 4px">摘 要（条目式，如「项目名称：…」，一行一条）</div>
+        <textarea id="frontAbstract" rows="8" style="width:100%;font-size:13px;line-height:1.6"
+          placeholder="留空则导出时不生成摘要页"></textarea>
+        <div class="btn-row" style="margin-top:8px">
+          <button id="frontDraftBtn" onclick="draftFrontMatter()" style="font-size:12px;padding:4px 10px">自动起草</button>
+          <button class="ghost" onclick="saveFrontMatter()" style="font-size:12px;padding:4px 10px">保存</button>
+          <span class="muted" id="frontMsg" style="font-size:12px"></span>
+        </div>
+      </div>
+    </div>
+    <div class="btn-row" id="previewActions" style="margin-bottom:8px">
+      <button onclick="exportFull('docx')">导出 Word</button>
+      <button class="ghost" onclick="exportFull('pdf')">导出 PDF</button>
+      <button class="ghost" onclick="exportFull('md')">导出 Markdown</button>
+    </div>
+    <div id="preview" class="doc-preview">请先选择项目</div>
+    <h3 style="margin-top:16px">操作记录（审计）</h3>
+    <div id="recList" class="muted">请先选择项目</div>
+  </div>
+</div>
+
+<!-- 推理过程弹窗 -->
+<div class="modal-mask" id="reasoningModal">
+  <div class="modal">
+    <div class="modal-header">
+      <span>🤔 AI 推理思考过程</span>
+      <button class="modal-close" onclick="closeReasoning()">×</button>
+    </div>
+    <div class="modal-body" id="reasoningContent"></div>
+  </div>
+</div>
+
+<!-- 第三方模型数据风险提示（点生成 / 自动起草前弹出，可取消或继续） -->
+<div class="modal-mask" id="riskModal">
+  <div class="modal" style="max-width:540px">
+    <div class="modal-header">
+      <span>⚠️ 数据安全提示</span>
+      <button class="modal-close" onclick="closeRisk(false)">×</button>
+    </div>
+    <div class="modal-body" id="riskBody" style="white-space:normal;background:#fff"></div>
+    <div style="padding:14px 20px;border-top:1px solid #e5e7eb;display:flex;justify-content:flex-end;gap:10px;background:#fff">
+      <button class="ghost" onclick="closeRisk(false)">取消</button>
+      <button style="background:#dc2626" onclick="closeRisk(true)">我已知晓，继续</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let current = null;
+const $ = id => document.getElementById(id);
+const esc = s => (s || '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+async function api(path, opt) {
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || data.message || (r.status + ' ' + path));
+  return data;
+}
+// 第三方模型数据风险提示：返回 true 才继续生成
+let _riskResolver = null;
+function askRisk(detail) {
+  return new Promise(resolve => {
+    _riskResolver = resolve;
+    $('riskBody').innerHTML = detail || `
+      <div style="font-size:13px;line-height:1.9;color:#111">
+        <p style="margin:0 0 8px">生成正文会把你<b>项目的名称、章节要求和已上传的知识库资料</b>发送到第三方大模型服务（DeepSeek）用于撰写，这些内容将离开本机。</p>
+        <p style="margin:0 0 8px">因此存在<b>数据外泄、被第三方留存或用于模型训练</b>的风险；涉密、敏感或不宜外传的资料有暴露可能。</p>
+        <p style="margin:0">确认资料可以外发再点「继续」；不确定就先点「取消」，删去敏感内容或改用本地模型后再生成。</p>
+      </div>`;
+    $('riskModal').style.display = 'flex';
+  });
+}
+function closeRisk(ok) {
+  $('riskModal').style.display = 'none';
+  const r = _riskResolver;
+  _riskResolver = null;
+  if (r) r(!!ok);
+}
+
+async function loadProjects() {
+  // 在页头显示后端当前加载的前端文件版本，便于确认浏览器跑的是不是新界面
+  try {
+    const v = await api('/api/version');
+    $('verTag').textContent = `界面版本 ${v.index_mtime}`;
+  } catch (e) {}
+  const showArch = $('showArchived') && $('showArchived').checked;
+  const list = await api('/api/projects' + (showArch ? '?include_archived=1' : ''));
+  window._projMap = {};
+  list.forEach(p => { window._projMap[p.id] = p; });
+  $('projList').innerHTML = list.length ? '' : `<div class="muted">${showArch ? '暂无项目' : '暂无项目（已归档的不显示）'}</div>`;
+  list.forEach(p => {
+    const arch = !!p.archived;
+    const d = document.createElement('div');
+    d.className = 'item' + (current && current.id === p.id ? ' active' : '');
+    if (arch) d.style.opacity = '0.5';
+    d.innerHTML = `
+      <span style="flex:1">${esc(p.name)}${arch ? ' <span style="font-size:10px;color:#9ca3af;border:1px solid #e5e7eb;border-radius:3px;padding:0 3px">已归档</span>' : ''}</span>
+      <button class="ghost" onclick="renameProject('${p.id}', '${esc(p.name).replace(/'/g, "\\'")}')" title="重命名" style="padding:2px 8px;font-size:11px">✏️</button>
+      <button class="ghost" onclick="toggleArchive('${p.id}', ${arch ? 0 : 1})" title="${arch ? '取消归档' : '归档（不再显示在列表里）'}" style="padding:2px 8px;font-size:11px">${arch ? '♻️' : '🗄️'}</button>
+      <button class="ghost" onclick="selectProject('${p.id}')">选择</button>
+    `;
+    $('projList').appendChild(d);
+  });
+  if (current) {
+    const fresh = list.find(p => p.id === current.id);
+    if (!fresh) current = null;
+  }
+}
+
+async function toggleArchive(pid, archived) {
+  const p = (window._projMap || {})[pid] || {};
+  if (archived && !confirm(`归档后「${p.name || '该项目'}」不再显示在项目列表里（数据仍保留，勾选「显示已归档」可找回）。确定归档吗？`)) return;
+  await api(`/api/projects/${pid}/archive`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ archived: !!archived })
+  });
+  if (archived && current && current.id === pid) {
+    current = null;
+    renderScope();
+    await loadChapters();
+  }
+  await loadProjects();
+}
+async function createProject() {
+  const name = $('projName').value.trim();
+  if (!name) return alert('请输入项目名称');
+  const p = await api('/api/projects', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, description: $('projDesc').value.trim() }) });
+  $('projName').value = ''; $('projDesc').value = '';
+  current = p; renderScope(); await loadProjects(); await loadChapters(); await loadStats(); await loadRecords();
+}
+async function selectProject(id) {
+  const showArch = $('showArchived') && $('showArchived').checked;
+  const list = await api('/api/projects' + (showArch ? '?include_archived=1' : ''));
+  current = list.find(p => p.id === id) || null;
+  renderScope(); await loadProjects(); await loadChapters(); await loadRecords();
+  maybeResumeBatch();
+}
+
+async function renameProject(pid, oldName) {
+  const newName = prompt('请输入新的项目名称：', oldName);
+  if (!newName || newName.trim() === oldName) return;
+  try {
+    await api(`/api/projects/${pid}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name: newName.trim(),
+        description: (window._projMap[pid] || {}).description || ''   // 只改名时不要清空简介
+      })
+    });
+    await loadProjects();
+    if (current && current.id === pid) {
+      current.name = newName.trim();
+      renderScope();
+    }
+  } catch (e) {
+    alert('重命名失败：' + e.message);
+  }
+}
+async function loadRecords() {
+  $('recList').innerHTML = current ? '<div class="muted">加载操作记录…</div>' : '<div class="muted">请先选择项目</div>';
+  if (!current) return;
+  try {
+    const ops = await api(`/api/projects/${current.id}/operations?limit=80`);
+    if (!ops.length) { $('recList').innerHTML = '<div class="muted">暂无操作记录</div>'; return; }
+    const labels = {
+      project_create: '创建项目', project_update: '修改项目',
+      chapter_create: '新增章节', chapter_delete: '删除章节',
+      chapter_generate: '生成章节', batch_generate: '批量生成',
+      template_import: '导入模板', kb_ingest: '知识库入库',
+      export: '导出文件', proposal_generate: '全量生成'
+    };
+    const statusColors = { success: '#15803d', failed: '#dc2626', started: '#b45309' };
+    window._lastOps = ops;
+    $('recList').innerHTML = ops.map(o => {
+      const label = labels[o.action] || o.action;
+      const color = statusColors[o.status] || '#6b7280';
+      const time = (o.created_at || '').slice(5, 16);
+      const running = o.status === 'started' ? '<span class="op-running">进行中…</span>' : '';
+      const dl = (o.file_path && o.status === 'success')
+        ? `<button class="ghost op-dl" onclick="downloadExport('${o.id}')">下载</button>` : '';
+      return `<div class="op-item">
+        <div class="op-head">
+          <span class="op-time">${esc(time)}</span>
+          <span class="op-tag" style="color:${color}">${esc(label)}</span>
+          <span class="op-target" title="${esc(o.target)}">${esc(o.target)}</span>
+          ${running}${dl}
+        </div>
+        ${o.detail ? `<div class="op-detail">${esc(o.detail)}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (e) { $('recList').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+async function showRecord(id) {
+  // 旧版全量生成记录已废弃：预览统一走章节表的全文预览，保证与导出同源
+  await loadFullPreview();
+}
+async function exportFull(fmt) {
+  if (!current) return alert('请先选择项目');
+  try {
+    const r = await api(`/api/export/full_async?project_id=${current.id}&fmt=${fmt}`, { method: 'POST' });
+    window._exportOpId = r.op_id;
+    alert(`已提交后台导出（${fmt.toUpperCase()}）。\n生成完成后可在下方「操作记录（审计）」中点击「下载」。`);
+    await loadRecords();
+    // 操作记录在预览区下方，提交后把视野带到记录区，便于看到进行中/可下载状态
+    $('recList').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // 轮询刷新导出状态，直到本次任务变为成功/失败或超时
+    let tries = 0;
+    const timer = setInterval(async () => {
+      tries++;
+      await loadRecords();
+      const op = (window._lastOps || []).find(o => o.id === window._exportOpId);
+      if ((op && op.status !== 'started') || tries >= 25) clearInterval(timer);
+    }, 3000);
+  } catch (e) { alert('提交失败：' + e.message); }
+}
+
+function downloadExport(opId) {
+  window.open(`/api/exports/${opId}/download`, '_blank');
+}
+
+// 预览样式完全取自后端返回的模板样式定义（上传 Word 模板时采集），不在前端写死字号字体
+function docCssFont(name) {
+  const n = (name || '').trim();
+  if (!n) return 'inherit';
+  const generic = /黑|雅黑|等线/.test(n) ? 'sans-serif' : 'serif';
+  const fb = generic === 'sans-serif' ? '微软雅黑' : '宋体';
+  // 单引号：整串要塞进 style="..." 属性里，用双引号会把属性截断
+  return `'${n}', '${fb}', ${generic}`;
+}
+function docPx(pt) {
+  // 网页观感按 0.85 折算（26pt 模版标题在页面上约 22px）
+  return Math.round((pt || 0) * 0.85 * 10) / 10;
+}
+function docHeadCss(st, level, isTitle) {
+  if (isTitle) {
+    const t = (st && st.title) || {};
+    return `font-family:${docCssFont(t.font)};font-size:${docPx(t.size || 26)}px;`
+      + `font-weight:${t.bold ? 700 : 400};text-align:${t.align === 'center' ? 'center' : 'left'};`
+      + `margin:0 0 ${docPx((t.size || 26) * 0.55)}px;`;
+  }
+  const levels = (st && st.levels) || [];
+  const s = levels[Math.min(Math.max(level - 1, 0), Math.max(levels.length - 1, 0))] || {};
+  const size = s.size || 16;
+  // 段前段后与首行缩进都按模板采集值：标题没有段距就不加，3~6 级带 2 字符缩进，
+  // 与导出的 Word 保持同一套参数
+  const before = s.spaceBefore != null ? s.spaceBefore : 0;
+  const after = s.spaceAfter != null ? s.spaceAfter : 0;
+  const ind = s.indentChars || 0;
+  return `font-family:${docCssFont(s.font)};font-size:${docPx(size)}px;`
+    + `font-weight:${s.bold ? 700 : 400};font-style:normal;text-align:${s.align === 'center' ? 'center' : 'left'};`
+    + `margin:${docPx(before)}px 0 ${docPx(after)}px;text-indent:${ind}em;`;
+}
+function docBodyCss(st) {
+  const b = (st && st.body) || {};
+  const indent = b.indentChars != null ? b.indentChars : 2;
+  // 行距：模板给固定磅值就用换算后的行高，否则用倍数；对齐也照模板（多为两端对齐）
+  const size = b.size || 16;
+  const lh = b.lineSpacingPt ? (b.lineSpacingPt / size) : (b.lineSpacing || 1.6);
+  const align = b.align === 'center' ? 'center' : (b.align === 'right' ? 'right' : 'justify');
+  return `font-family:${docCssFont(b.font)};font-size:${docPx(size)}px;`
+    + `line-height:${lh};text-indent:${indent}em;text-align:${align};`
+    + `margin-top:${docPx(b.spaceBefore || 0)}px;margin-bottom:${docPx(b.spaceAfter || 0)}px;`;
+}
+
+// 预览里的 Markdown 表格 → 真表格（与导出的 Word/PDF 同尺寸、同表头加粗）
+function _mdTableRows(lines) {
+  const rows = [];
+  lines.forEach(l => {
+    const s = l.trim();
+    if (/^\|[\s\-:|\u2014]+\|$/.test(s)) return;  // |---| 分隔行
+    rows.push(s.replace(/^\|/, '').replace(/\|$/, '').split('|').map(x => x.trim()));
+  });
+  return rows;
+}
+function _tableHtml(rows, tblSpec, bodyFont) {
+  const spec = tblSpec || {};
+  const size = spec.size || 12;
+  const headBold = spec.headerBold !== false;
+  let h = '<table style="width:100%;border-collapse:collapse;margin:6px 0 8px;'
+    + `font-size:${docPx(size)}px;font-family:${docCssFont(bodyFont)};table-layout:fixed;">`;
+  rows.forEach((r, i) => {
+    h += '<tr>';
+    r.forEach(c => {
+      h += `<td style="border:1px solid #000;padding:3px 4px;text-align:center;`
+        + `${i === 0 && headBold ? 'font-weight:700;' : ''}">${esc(c)}</td>`;
+    });
+    h += '</tr>';
+  });
+  return h + '</table>';
+}
+function docCaptionCss(st) {
+  const cap = (st && st.caption) || {};
+  return `font-family:${docCssFont(cap.font || (st && st.body || {}).font)};`
+    + `font-size:${docPx(cap.size || 12)}px;`
+    + `font-weight:${cap.bold ? 700 : 400};`
+    + `text-align:${cap.align === 'center' ? 'center' : 'left'};`
+    + `margin:4px 0 8px;text-indent:0;`;
+}
+// ---------- 前言 / 摘要 ----------
+function toggleFront() {
+  const box = $('frontEdit');
+  const open = box.style.display === 'none' || !box.style.display;
+  box.style.display = open ? 'block' : 'none';
+  $('frontToggle').textContent = open ? '收起' : '展开编辑';
+}
+function frontStatText(preface, abstract) {
+  const p = (preface || '').trim(), a = (abstract || '').trim();
+  if (!p && !a) return '未填写，导出时不会有这两页';
+  return `前言 ${p.length} 字 · 摘要 ${a.length} 字，导出时插在目录前`;
+}
+async function loadFrontMatter() {
+  if (!current) return { preface: '', abstract: '' };
+  try {
+    const d = await api(`/api/projects/${current.id}/front_matter`);
+    $('frontPreface').value = d.preface || '';
+    $('frontAbstract').value = d.abstract || '';
+    $('frontState').textContent = frontStatText(d.preface, d.abstract);
+    return d;
+  } catch (e) {
+    $('frontState').textContent = '读取失败：' + e.message;
+    return { preface: '', abstract: '' };
+  }
+}
+// 从还没写完的 JSON 里取某个键「当前」的字符串值（字符串未闭合也照取，供流式回显）
+function _jsonPartialStr(raw, key) {
+  const k = '"' + key + '"';
+  const i = raw.indexOf(k);
+  if (i < 0) return null;
+  const colon = raw.indexOf(':', i + k.length);
+  if (colon < 0) return null;
+  let j = raw.indexOf('"', colon + 1);
+  if (j < 0) return null;
+  let out = '';
+  for (j += 1; j < raw.length; j++) {
+    const ch = raw[j];
+    if (ch === '\\') {
+      const n = raw[j + 1];
+      if (n === undefined) break;
+      if (n === 'n') { out += '\n'; j += 1; }
+      else if (n === 'r') { j += 1; }
+      else if (n === 't') { out += ' '; j += 1; }
+      else if (n === 'u') {
+        const hex = raw.slice(j + 2, j + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
+        out += String.fromCharCode(parseInt(hex, 16)); j += 5;
+      }
+      else { out += n; j += 1; }
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+  }
+  return out;
+}
+
+async function draftFrontMatter() {
+  if (!current) { $('frontMsg').textContent = '请先选择项目'; return; }
+  const btn = $('frontDraftBtn');
+  if (!await askRisk(`<div style="font-size:13px;line-height:1.9;color:#111">
+      <p style="margin:0 0 8px">自动起草会把本项目已生成的章节正文发送到第三方大模型服务（DeepSeek）用于概括前言和摘要。</p>
+      <p style="margin:0 0 8px">存在<b>数据外泄、被第三方留存</b>的风险，涉密项目请勿使用。</p>
+      <p style="margin:0">确定继续起草吗？</p>
+    </div>`)) return;
+  // 起草过程要看得见：面板收起时先展开
+  if ($('frontEdit').style.display === 'none' || !$('frontEdit').style.display) toggleFront();
+  btn.disabled = true; btn.textContent = '起草中…';
+  $('frontMsg').textContent = '正在起草，内容会实时写入下面两个框…';
+  $('frontPreface').value = ''; $('frontAbstract').value = '';
+  let raw = '';
+  // 模型有时先思考较久才开始出字，这里显示已等待秒数，避免看起来像卡死
+  let waited = 0;
+  const timer = setInterval(() => {
+    waited += 1;
+    if (!raw) $('frontMsg').textContent = `正在起草… 已等待 ${waited}s（模型思考中，出字后实时写入下方两框）`;
+  }, 1000);
+  const paint = () => {
+    const p = _jsonPartialStr(raw, 'preface') || '';
+    const a = _jsonPartialStr(raw, 'abstract') || '';
+    const pf = $('frontPreface'), ab = $('frontAbstract');
+    if (p && pf.value !== p) { pf.value = p; pf.scrollTop = pf.scrollHeight; }
+    if (a && ab.value !== a) { ab.value = a; ab.scrollTop = ab.scrollHeight; }
+    $('frontState').textContent = `起草中… 前言 ${p.length} 字 · 摘要 ${a.length} 字`;
+  };
+  try {
+    const res = await fetch(`/api/projects/${current.id}/front_matter/draft/stream`, { method: 'POST' });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const reader = res.body.getReader();
+    const dec = new TextDecoder('utf-8');
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const blocks = buf.split('\n\n');
+      buf = blocks.pop();
+      for (const b of blocks) {
+        const line = b.trim();
+        if (!line.startsWith('data: ')) continue;
+        let ev;
+        try { ev = JSON.parse(line.slice(6)); } catch (e2) { continue; }
+        if (ev.type === 'delta') { raw += ev.data; paint(); }
+        else if (ev.type === 'done') {
+          $('frontPreface').value = ev.data.preface || '';
+          $('frontAbstract').value = ev.data.abstract || '';
+          $('frontState').textContent = frontStatText(ev.data.preface, ev.data.abstract);
+          $('frontMsg').textContent = `草稿已生成（依据 ${ev.data.generated_chapters} 章已生成正文），核对数字后点「保存」`;
+        } else if (ev.type === 'error') {
+          $('frontMsg').textContent = '起草失败：' + ev.data;
+        }
+      }
+    }
+  } catch (e) {
+    $('frontMsg').textContent = '起草失败：' + e.message;
+  } finally {
+    clearInterval(timer);
+    btn.disabled = false; btn.textContent = '自动起草';
+  }
+}
+async function saveFrontMatter() {
+  if (!current) { $('frontMsg').textContent = '请先选择项目'; return; }
+  try {
+    const d = await api(`/api/projects/${current.id}/front_matter`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preface: $('frontPreface').value, abstract: $('frontAbstract').value })
+    });
+    $('frontMsg').textContent = '已保存，导出时会插在目录前';
+    $('frontState').textContent = frontStatText(d.preface, d.abstract);
+    await loadFullPreview();
+  } catch (e) {
+    $('frontMsg').textContent = '保存失败：' + e.message;
+  }
+}
+
+async function loadFullPreview() {
+  const el = $('preview');
+  if (!current) { el.innerHTML = '<div class="muted">请先选择项目</div>'; return; }
+  const fm = await loadFrontMatter();
+  el.innerHTML = '<div class="muted">加载全文预览…</div>';
+  try {
+    const d = await api(`/api/projects/${current.id}/full_preview`);
+    if (!d.chapters.length) { el.innerHTML = '<div class="muted">暂无章节，请先上传模板或手动添加章节</div>'; return; }
+    const st = d.style || {};
+    const bodyCss = docBodyCss(st);
+    const capCss = docCaptionCss(st);
+    const pg = st.page || {};
+    const bd = st.body || {};
+    const tb = st.table || {};
+    let srcNote = '未采集到模板样式，使用默认公文样式';
+    if (d.style_source === 'template') {
+      srcNote = '版式来自上传模板';
+      if (pg.width) srcNote += ` · A4 ${pg.width}×${pg.height}cm 边距 上${pg.marginTop}/下${pg.marginBottom}/左${pg.marginLeft}/右${pg.marginRight}`;
+      srcNote += ` · 正文 ${bd.size}pt ${bd.font}`;
+      if (tb.size) srcNote += ` · 表格 ${tb.size}pt`;
+    }
+    const parts = [
+      `<div class="doc-title" style="${docHeadCss(st, 1, true)}">${esc(d.project)}技术方案</div>`,
+      `<div class="doc-stat">共 ${d.total} 章 · 已生成 ${d.generated_count} 章 · 待生成 ${d.pending_count} 章 · ${esc(srcNote)}</div>`
+    ];
+    // 前言 / 摘要：与导出件同源，排在正文之前（导出时还有目录页）
+    if ((fm.preface || '').trim()) {
+      parts.push(`<div class="doc-head" style="${docHeadCss(st, 1, false)}">前　言</div>`);
+      fm.preface.split(/\n/).map(p => p.trim()).filter(Boolean).forEach(p =>
+        parts.push(`<div class="doc-p" style="${bodyCss}">${esc(p)}</div>`));
+    }
+    if ((fm.abstract || '').trim()) {
+      parts.push(`<div class="doc-head" style="${docHeadCss(st, 1, false)}">摘　要</div>`);
+      fm.abstract.split(/\n/).map(p => p.trim()).filter(Boolean).forEach(p =>
+        parts.push(`<div class="doc-p" style="${bodyCss}">${esc(p)}</div>`));
+    }
+    d.chapters.forEach((c, i) => {
+      // 编号与字体字号都来自后端（模板 numbering + 采集的样式），保证预览与导出同源一致
+      const label = `${c.no || ''}${c.title || ''}`;
+      // 有下级标题的章节只是结构节点，不需要自己写正文，也不该打"未生成"
+      const nxt = d.chapters[i + 1];
+      const hasChildren = !!nxt && ((nxt.level || 1) > (c.level || 1));
+      const badge = (c.generated || hasChildren) ? '' : '<span class="doc-badge">未生成</span>';
+      parts.push(`<div class="doc-head" style="${docHeadCss(st, c.level, false)}">${esc(label)}${badge}</div>`);
+      if (c.generated) {
+        const lines = c.content.split(/\n/).map(p => p.trim()).filter(Boolean);
+        let buf = [];
+        const flushTable = () => {
+          if (buf.length) { parts.push(_tableHtml(_mdTableRows(buf), st.table, bd.font)); buf = []; }
+        };
+        lines.forEach(p => {
+          if (/^\|.*\|$/.test(p)) { buf.push(p); return; }
+          flushTable();
+          if (/^(图|表)\s*[0-9一二三四五六七八九十]+/.test(p)) {
+            parts.push(`<div style="${capCss}">${esc(p)}</div>`);
+          } else {
+            parts.push(`<div class="doc-p" style="${bodyCss}">${esc(p)}</div>`);
+          }
+        });
+        flushTable();
+      } else if (!hasChildren) {
+        parts.push(`<div class="doc-pending" style="font-family:inherit;font-size:${docPx(((st.body || {}).size) || 16)}px">（本章尚未生成）</div>`);
+      }
+    });
+    el.innerHTML = parts.join('');
+  } catch (e) {
+    el.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+function renderScope() {
+  if (!current) { $('curProj').textContent = '未选择项目'; return; }
+  $('curProj').textContent = `当前项目：${current.name}`;
+}
+async function loadChapters(opts) {
+  const skipPreview = !!(opts && opts.skipPreview);
+  $('chList').innerHTML = '<div class="muted">' + (current ? '加载章节…' : '请先选择项目') + '</div>';
+  if (!current) return;
+  const chs = await api(`/api/projects/${current.id}/chapters`);
+  $('chList').innerHTML = chs.length ? '' : '<div class="muted">暂无章节</div>';
+  window._chapterMap = {};
+  
+  // 判断每个章节是否有子章节：下一个章节的 level 大于当前章节，则有子章节
+  const hasChildren = chs.map((c, i) => {
+    if (i + 1 >= chs.length) return false;
+    return chs[i + 1].level > c.level;
+  });
+  
+  chs.forEach((c, idx) => {
+    window._chapterMap[c.id] = c;
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.dataset.cid = c.id;
+    const level = c.level || 1;
+    const indent = (level - 1) * 16;
+    const fontWeight = level === 1 ? '600' : '400';
+    const fontSize = level === 1 ? '13px' : '12.5px';
+    d.style.paddingLeft = '4px';
+    // 正在生成的章节高亮，避免"操作记录在跑、列表没反应"
+    const isGen = window._genChapterId === c.id;
+    if (isGen) d.style.background = '#fefce8';
+    
+    const isLeaf = !hasChildren[idx];
+    // 非叶子节点用占位符顶替复选框宽度，保证标题垂直对齐
+    let checkbox = `<span style="display:inline-block;width:13px;height:13px;flex:0 0 auto"></span>`;
+    let actionBtn = '';
+    if (isLeaf) {
+      // 叶子节点：复选框 + 操作按钮；重绘后按上次勾选状态恢复，避免批量过程中勾选被清空
+      const hasContent = c.content && c.content.trim().length > 0;
+      const checked = window._selectedSet && window._selectedSet.has(c.id) ? ' checked' : '';
+      checkbox = `<input type="checkbox" class="ch-check" data-cid="${c.id}"${checked} style="flex:0 0 auto;width:13px;height:13px;margin:0" onchange="updateBatchCount()">`;
+      actionBtn = isGen
+        ? `<span style="font-size:12px;color:#b45309">⏳ 生成中…</span>`
+        : (hasContent
+          ? `<button class="ghost" style="color:#2563eb" data-cid="${c.id}" onclick="viewChapter(this.dataset.cid)">查看</button>
+             <button class="ghost" style="color:#16a34a" data-cid="${c.id}" onclick="exportChapter(this.dataset.cid, 'docx')">导出</button>
+             <button class="ghost" data-cid="${c.id}" onclick="generateChapter(this.dataset.cid, this)">重生成</button>`
+          : `<button class="ghost" data-cid="${c.id}" onclick="generateChapter(this.dataset.cid, this)">生成</button>`);
+    }
+    
+    d.innerHTML = `${checkbox}
+      <span class="item-title ch-title" style="margin-left:${indent}px;font-weight:${fontWeight};font-size:${fontSize}" title="${esc(c.title)}">${level > 1 ? '└ ' : ''}${esc(c.title)}</span>
+      <span class="item-actions">
+        ${actionBtn}
+        <button class="ghost" style="color:#2563eb" data-cid="${c.id}" onclick="editChapterTitle(this.dataset.cid)">改题</button>
+        <button class="ghost" style="color:#dc2626" data-cid="${c.id}" onclick="deleteChapter(this.dataset.cid)">删除</button>
+      </span>`;
+    $('chList').appendChild(d);
+  });
+  // 记录叶子章节，供全选用
+  window._leafIds = chs.filter((c, i) => !hasChildren[i]).map(c => c.id);
+  $('batchBar').style.display = window._leafIds.length ? 'flex' : 'none';
+  updateBatchCount();
+  // 章节级上传下拉：让用户选择目标章节
+  const sel = $('scopeSel');
+  if (chs.length) {
+    const opts2 = chs.map(c => `<option value="${c.id}">${esc(c.code)} ${esc(c.title)}</option>`).join('');
+    $('chapterTargetSel').innerHTML = '目标章节：<select id="chTarget">' + opts2 + '</select>';
+  }
+  // 章节结构变化后同步刷新全文预览（批量进度中的高频刷新可跳过）
+  if (!skipPreview) loadFullPreview();
+}
+
+// 改章节标题：行内编辑，回车保存、Esc 取消、失焦也保存
+function editChapterTitle(cid) {
+  const ch = (window._chapterMap || {})[cid];
+  if (!ch) return;
+  const row = document.querySelector(`.item[data-cid="${cid}"]`);
+  if (!row || row.querySelector('.ch-title-input')) return;
+  const span = row.querySelector('.ch-title');
+  if (!span) return;
+  const input = document.createElement('input');
+  input.className = 'ch-title-input';
+  input.value = ch.title || '';
+  input.style.cssText = `flex:1;min-width:180px;font-size:12.5px;padding:2px 6px;margin-left:${span.style.marginLeft || '0px'};border:1px solid #93c5fd;border-radius:4px;background:#fff;color:#111`;
+  span.style.display = 'none';
+  span.after(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const val = (input.value || '').trim();
+    if (!save || !val || val === (ch.title || '')) {
+      // 标题本身可以带「（一）」这类前缀，用户清空才算放弃
+      loadChapters({});
+      return;
+    }
+    try {
+      await api(`/api/chapters/${cid}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ title: val })
+      });
+      ch.title = val;
+    } catch (e) {
+      alert('改题失败：' + e.message);
+    }
+    loadChapters({});
+  };
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+function updateBatchCount() {
+  // 记住当前勾选，供章节列表重绘后恢复（批量进行中列表会定期刷新）
+  window._selectedSet = new Set(
+    Array.from(document.querySelectorAll('.ch-check:checked')).map(cb => cb.dataset.cid)
+  );
+  const n = window._selectedSet.size;
+  $('batchCount').textContent = `已选 ${n} 个章节`;
+  $('batchBtn').disabled = n === 0 || window._batchRunning;
+}
+
+// 行内状态：不依赖后端刷新，点了立刻能看到"排队中/生成中/已完成"，避免"操作记录在跑、列表没反应"
+function setRowState(cid, state) {
+  const cb = document.querySelector(`.ch-check[data-cid="${cid}"]`);
+  if (!cb) return;
+  const row = cb.closest('.item');
+  if (!row) return;
+  const actions = row.querySelector('.item-actions');
+  if (!actions) return;
+  const del = `<button class="ghost" style="color:#dc2626" data-cid="${cid}" onclick="deleteChapter(this.dataset.cid)">删除</button>`;
+  if (state === 'queued') {
+    row.style.background = '';
+    actions.innerHTML = `<span style="font-size:12px;color:#6b7280">排队中…</span>${del}`;
+  } else if (state === 'running') {
+    row.style.background = '#fefce8';
+    actions.innerHTML = `<span style="font-size:12px;color:#b45309">⏳ 生成中…</span>${del}`;
+  } else if (state === 'done') {
+    row.style.background = '';
+    actions.innerHTML = `<button class="ghost" style="color:#2563eb" data-cid="${cid}" onclick="viewChapter(this.dataset.cid)">查看</button>
+      <button class="ghost" style="color:#16a34a" data-cid="${cid}" onclick="exportChapter(this.dataset.cid, 'docx')">导出</button>
+      <button class="ghost" data-cid="${cid}" onclick="generateChapter(this.dataset.cid, this)">重生成</button>${del}`;
+  } else if (state === 'failed') {
+    row.style.background = '';
+    actions.innerHTML = `<span style="font-size:12px;color:#dc2626">失败</span>
+      <button class="ghost" data-cid="${cid}" onclick="generateChapter(this.dataset.cid, this)">生成</button>${del}`;
+  } else if (state === 'stopped') {
+    row.style.background = '';
+    actions.innerHTML = `<span style="font-size:12px;color:#6b7280">已停止（服务端仍会写完）</span>${del}`;
+  }
+}
+
+function selectAllLeaves() {
+  document.querySelectorAll('.ch-check').forEach(cb => cb.checked = true);
+  updateBatchCount();
+}
+
+function clearSelection() {
+  document.querySelectorAll('.ch-check').forEach(cb => cb.checked = false);
+  updateBatchCount();
+}
+
+window._batchRunning = false;
+window._batchStopFlag = false;
+window._batchAbort = null;
+
+function stopBatch() {
+  window._batchStopFlag = true;
+  if (window._batchResumeTimer) { clearTimeout(window._batchResumeTimer); window._batchResumeTimer = null; }
+  // 用户主动停止：把还没落定的章节标成已停止，并清掉续跑记录，避免下次打开又自动跑起来
+  if (window._batchTask) {
+    Object.keys(window._batchTask.states).forEach(cid => {
+      const s = window._batchTask.states[cid];
+      if (s !== 'done' && s !== 'failed') {
+        window._batchTask.states[cid] = 'stopped';
+        setRowState(cid, 'stopped');
+      }
+    });
+    window._batchTask = null;
+    saveBatchTask();
+  }
+  // 立刻中断所有正在等待的章节（服务端仍会跑完并写库，只是前端不再等）
+  if (window._batchAborts) {
+    window._batchAborts.forEach(ctrl => { try { ctrl.abort(); } catch (e) {} });
+    window._batchAborts.clear();
+  }
+  if (window._batchAbort) {
+    try { window._batchAbort.abort(); } catch (e) {}
+    window._batchAbort = null;
+  }
+  window._genChapterId = null;
+  window._batchRunning = false;
+  $('batchBtn').disabled = false;
+  $('batchBtn').textContent = '批量生成';
+  $('batchStopBtn').style.display = 'none';
+  $('batchProgress').textContent = '已停止（正在生成的那几章服务端仍会写完）';
+}
+
+function generateAllChapters() {
+  if (!current) return alert('请先选择项目');
+  if (window._batchRunning) return alert('批量生成正在进行中，请等待完成或先点停止');
+  const leaves = window._leafIds || [];
+  if (!leaves.length) return alert('当前项目没有可生成的叶子章节');
+  // 只生成还没有正文的章节，已生成的保留不动（要重跑单章点行内「重生成」）
+  const todo = leaves.filter(cid => {
+    const c = (window._chapterMap || {})[cid];
+    return !(c && c.content && c.content.trim());
+  });
+  if (!todo.length) return alert('所有章节都已生成，没有需要再生成的章节');
+  const skipped = leaves.length - todo.length;
+  // 勾选状态与本次任务保持一致：只勾未生成的
+  document.querySelectorAll('.ch-check').forEach(cb => { cb.checked = todo.includes(cb.dataset.cid); });
+  updateBatchCount();
+  const bar = $('batchBar');
+  if (bar) bar.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (skipped > 0) {
+    $('batchProgress').textContent = `已跳过 ${skipped} 个已生成章节，准备生成 ${todo.length} 个`;
+  }
+  batchGenerate(todo);
+}
+
+// 批量并发生成：同时在跑几章。100 路是按网关实测上限（约 200）留一半余量定的。
+const BATCH_CONCURRENCY = 100;
+
+// 刷新页面会丢掉内存里的进度：把任务清单和每章状态写进 localStorage，
+// 重新打开页面（或重选项目）时恢复「排队中 / 生成中」并自动续跑剩下的章节。
+const BATCH_STORE_KEY = 'proposalAgentBatchTask';
+window._batchTask = null;
+
+function saveBatchTask() {
+  try {
+    if (window._batchTask) localStorage.setItem(BATCH_STORE_KEY, JSON.stringify(window._batchTask));
+    else localStorage.removeItem(BATCH_STORE_KEY);
+  } catch (e) {}
+}
+function loadBatchTask() {
+  try { return JSON.parse(localStorage.getItem(BATCH_STORE_KEY) || 'null'); } catch (e) { return null; }
+}
+function setBatchItemState(task, cid, state) {
+  if (task) { task.states[cid] = state; saveBatchTask(); }
+  setRowState(cid, state);
+}
+
+function maybeResumeBatch() {
+  if (!current || window._batchRunning) return;
+  const t = loadBatchTask();
+  if (!t || t.projectId !== current.id) return;
+  const pending = (t.ids || []).filter(cid => {
+    const s = (t.states || {})[cid];
+    return s !== 'done' && s !== 'failed' && s !== 'stopped';
+  });
+  if (!pending.length) { window._batchTask = null; saveBatchTask(); return; }
+  window._batchTask = t;
+  // 先把上次没跑完的章节标回"排队中"，让人一眼看到任务还在
+  pending.forEach(cid => setRowState(cid, 'queued'));
+  window._batchRunning = true;
+  $('batchBtn').disabled = true;
+  $('batchBtn').textContent = '续跑中…';
+  $('batchStopBtn').style.display = 'inline-block';
+  $('batchProgress').textContent = `检测到上次未完成的批量任务：剩 ${pending.length} 章，3 秒后自动继续（点「停止」可取消）`;
+  window._batchResumeTimer = setTimeout(() => {
+    window._batchRunning = false;
+    if (!current) return;
+    batchGenerate(pending, { auto: true });
+  }, 3000);
+}
+
+async function batchGenerate(idsArg, opts) {
+  const auto = !!(opts && opts.auto);
+  if (window._batchRunning && !auto) return;
+  const checked = (idsArg && idsArg.length)
+    ? idsArg.slice()
+    : Array.from(document.querySelectorAll('.ch-check:checked')).map(cb => cb.dataset.cid);
+  if (!checked.length) return alert('请先勾选要生成的章节');
+  const lanes = Math.min(BATCH_CONCURRENCY, checked.length);
+  const estMin = Math.max(1, Math.round(checked.length * 1.9 / lanes));
+  if (!auto) {
+    const ok = await askRisk(`<div style="font-size:13px;line-height:1.9;color:#111">
+      <p style="margin:0 0 8px">即将并发生成 <b>${checked.length}</b> 个章节（同时在跑 ${lanes} 章，预计约 ${estMin} 分钟）。</p>
+      <p style="margin:0 0 8px">这些章节的知识库资料与章节要求会被发送到第三方大模型服务（DeepSeek），存在<b>数据外泄、被第三方留存</b>的风险。</p>
+      <p style="margin:0">中途可刷新页面，回来会自动续跑。确定继续吗？</p>
+    </div>`);
+    if (!ok) return;
+  }
+
+  // 任务清单落库到 localStorage：刷新后据此恢复状态并续跑
+  const task = { projectId: current.id, ids: checked, total: checked.length, states: {}, startedAt: Date.now() };
+  checked.forEach(cid => { task.states[cid] = 'queued'; setRowState(cid, 'queued'); });
+  window._batchTask = task;
+  saveBatchTask();
+
+  window._batchRunning = true;
+  window._batchStopFlag = false;
+  if (window._batchResumeTimer) { clearTimeout(window._batchResumeTimer); window._batchResumeTimer = null; }
+  $('batchBtn').disabled = true;
+  $('batchBtn').textContent = '生成中…';
+  $('batchStopBtn').style.display = 'inline-block';
+
+  let done = 0, failed = 0, finished = 0, stopped = false;
+  const failedList = [];
+  const aborts = window._batchAborts = new Set();
+
+  window._selectedSet = new Set(checked);
+
+  // 用一个游标分发任务，N 条并发通道各自取下一章，直到取完或用户停止
+  let cursor = 0;
+  const runLane = async () => {
+    while (true) {
+      if (window._batchStopFlag && !stopped) { stopped = true; }
+      if (stopped) return;
+      const i = cursor++;
+      if (i >= checked.length) return;
+      const cid = checked[i];
+      const title = (window._chapterMap[cid] || {}).title || cid;
+      window._genChapterId = cid;
+      setBatchItemState(task, cid, 'running');
+      const ctrl = new AbortController();
+      aborts.add(ctrl);
+      let chapterOk = false, aborted = false;
+      try {
+        const resp = await fetch(`/api/workflow/generate_chapter?project_id=${current.id}&chapter_id=${cid}`,
+                                 { method: 'POST', signal: ctrl.signal });
+        if (!resp.ok) {
+          // 把服务端的真实错误带出来，而不是只报 HTTP 状态码
+          let detail = '';
+          try { detail = (await resp.text()).slice(0, 160); } catch (e) {}
+          throw new Error(`HTTP ${resp.status}${detail ? '：' + detail : ''}`);
+        }
+        done++;
+        chapterOk = true;
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          stopped = true;
+          aborted = true;
+          setRowState(cid, 'stopped');
+        } else {
+          failed++;
+          failedList.push(`${title}（${e.message}）`);
+          console.error('生成失败:', title, e);
+        }
+      } finally {
+        aborts.delete(ctrl);
+        finished++;
+        setBatchItemState(task, cid, aborted ? 'stopped' : (chapterOk ? 'done' : 'failed'));
+        $('batchProgress').textContent = `进度 ${finished}/${checked.length}（成功 ${done}，失败 ${failed}，同时在跑 ${aborts.size} 章）`;
+        if (!stopped) loadRecords();
+      }
+      if (aborted) return;
+    }
+  };
+
+  const lanesArr = [];
+  for (let k = 0; k < lanes; k++) lanesArr.push(runLane());
+  await Promise.all(lanesArr);
+
+  window._batchRunning = false;
+  window._batchStopFlag = false;
+  window._genChapterId = null;
+  $('batchBtn').disabled = false;
+  $('batchBtn').textContent = '批量生成';
+  $('batchStopBtn').style.display = 'none';
+
+  // 每章都落定（done/failed/stopped）才清任务记录，否则下次打开会误续跑
+  const stillPending = checked.some(cid => {
+    const s = task.states[cid];
+    return s !== 'done' && s !== 'failed' && s !== 'stopped';
+  });
+  if (!stillPending) { window._batchTask = null; saveBatchTask(); }
+
+  let summary = stopped
+    ? `批量生成已停止：成功 ${done} 个，失败 ${failed} 个`
+    : `批量生成结束：成功 ${done} 个，失败 ${failed} 个`;
+  if (failedList.length) summary += `\n失败章节：\n- ` + failedList.join('\n- ');
+  $('batchProgress').textContent = summary.split('\n')[0];
+  if (failedList.length) alert(summary);
+
+  await loadChapters();
+  await loadRecords();
+  // 批量生成改的是章节正文，必须在结束时刷新全文预览，否则用户会觉得"生成了但预览没变"
+  await loadFullPreview();
+}
+
+function onTierChange() {
+  const tier = $('tier').value;
+  const chapterSel = $('chapterTargetSel');
+  const scopeSel = $('scopeSel');
+  if (tier === 'chapter') {
+    chapterSel.style.display = 'block';
+    scopeSel.textContent = '上传到章节库，仅对选中的章节生效';
+    loadChapterOptions();
+  } else if (tier === 'project') {
+    chapterSel.style.display = 'none';
+    scopeSel.textContent = '上传到项目库，对整个项目所有章节生效';
+  } else {
+    chapterSel.style.display = 'none';
+    scopeSel.textContent = '上传到全局库，所有项目通用';
+  }
+}
+async function addChapter() {
+  if (!current) return alert('请先选择项目');
+  const code = $('chCode').value.trim(), title = $('chTitle').value.trim();
+  if (!title) return alert('请输入章节标题');
+  await api(`/api/projects/${current.id}/chapters`, { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ code, title, description: $('chDesc').value.trim() }) });
+  $('chCode').value=''; $('chTitle').value=''; $('chDesc').value='';
+  await loadChapters();
+}
+async function uploadTemplate() {
+  if (!current) return alert('请先选择项目');
+  const file = $('templateFile').files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await api(`/api/projects/${current.id}/upload_template`, { method:'POST', body: fd });
+    let msg = `模板解析完成：共识别 ${r.total} 章，新增 ${r.created} 章`;
+    if (r.updated > 0) msg += `，更新 ${r.updated} 章层级`;
+    if (r.style_saved) {
+      const st = r.style || {};
+      const pg = st.page || {};
+      const b = st.body || {};
+      const tb = st.table || {};
+      const cp = st.caption || {};
+      const lv = st.levels || [];
+      msg += `\n\n已把这份模板的版式记录到本项目，以后导出 Word/PDF 都按它渲染：`;
+      if (pg.width) {
+        msg += `\n· 纸张 ${pg.width}×${pg.height}cm；页边距 上${pg.marginTop} 下${pg.marginBottom}`
+          + ` 左${pg.marginLeft} 右${pg.marginRight}cm${pg.footer != null ? '，页脚' + pg.footer + 'cm' : ''}`;
+      }
+      msg += `\n· 正文 ${b.size}pt ${b.font}，行距 ${b.lineSpacing}，首行缩进 ${b.indentChars} 字符`;
+      lv.forEach(l => {
+        msg += `\n· ${l.level} 级标题 ${l.size}pt ${l.font}${l.bold ? ' 加粗' : ' 不加粗'}`
+          + `${l.align === 'center' ? ' 居中' : ' 左对齐'}`
+          + `${l.indentChars ? ' 缩进' + l.indentChars + '字符' : ''}`
+          + `  编号「${l.lvlText || '—'}」`;
+      });
+      if (tb.size) msg += `\n· 表格 ${tb.size}pt${tb.headerBold ? '，表头加粗' : ''}`;
+      if (cp.size) msg += `\n· 图题/表题 ${cp.size}pt ${cp.font || ''}${cp.align === 'center' ? ' 居中' : ''}`;
+      msg += `\n· 页脚：居中页码`;
+    }
+    alert(msg);
+    await loadChapters();
+    await loadFullPreview();
+    await loadRecords();
+  } catch (e) {
+    alert('模板解析失败：' + e.message);
+  }
+  $('templateFile').value = '';
+}
+async function deleteChapter(cid) {
+  if (!confirm('确定要删除这个章节吗？')) return;
+  try {
+    await api(`/api/chapters/${cid}`, { method: 'DELETE' });
+    await loadChapters();
+    await loadRecords();
+  } catch (e) {
+    alert('删除失败：' + e.message);
+  }
+}
+function toggleReasoningPanel() {
+  const panel = $('reasoningPanel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+function showReasoning(text) {
+  $('reasoningContent').textContent = text;
+  $('reasoningModal').style.display = 'flex';
+}
+function closeReasoning() {
+  $('reasoningModal').style.display = 'none';
+}
+function toggleStep(id) {
+  const el = $(id);
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
+  }
+}
+window._genSteps = [];
+function viewChapter(cid) {
+  const ch = window._chapterMap[cid] || {};
+  const title = ch.title || '章节';
+  const content = ch.content || '暂无内容';
+  document.querySelector('#reasoningModal .modal-header span').textContent = `📖 ${title} - 生成内容`;
+  // 显示标题+正文
+  $('reasoningContent').textContent = `（${title}）\n\n${content}`;
+  $('reasoningModal').style.display = 'flex';
+}
+
+function exportChapter(cid, fmt) {
+  window.open(`/api/export/chapter/${cid}/${fmt}`, '_blank');
+  // 导出是后端审计动作，稍后刷新操作记录
+  setTimeout(() => loadRecords(), 800);
+}
+
+async function generateChapter(cid, btnEl) {
+  if (!current) return alert('请先选择项目');
+  const ch = window._chapterMap[cid] || {};
+  const title = ch.title || '该章节';
+  if (!await askRisk(`<div style="font-size:13px;line-height:1.9;color:#111">
+      <p style="margin:0 0 8px">即将生成章节「<b>${esc(title)}</b>」：本章的知识库资料和章节要求会被发送到第三方大模型服务（DeepSeek）。</p>
+      <p style="margin:0 0 8px">存在<b>数据外泄、被第三方留存</b>的风险，涉密或敏感内容请勿外发。</p>
+      <p style="margin:0">确定继续生成吗？</p>
+    </div>`)) return;
+
+  // 按钮状态：禁用 + 显示生成中
+  if (!btnEl) btnEl = event.target;
+  const oldText = btnEl.textContent;
+  btnEl.disabled = true;
+  btnEl.textContent = '生成中...';
+  btnEl.style.opacity = '0.6';
+  window._genChapterId = cid;
+
+  // 初始化智能体工作步骤
+  window._genSteps = [
+    { icon: '🔍', title: '三级知识库检索', desc: '按章节标题检索全局/项目/章节三级知识库，稠密向量 + BM25 混合召回', status: 'running' },
+    { icon: '📚', title: '整理引用素材', desc: '对召回的知识库片段按相关性排序，提取可用论据与来源标注', status: 'pending' },
+    { icon: '🤖', title: '调用 LLM 流式生成', desc: '将章节要求 + 知识库引用送入大模型，逐字输出章节正文', status: 'pending' },
+    { icon: '✅', title: '内容审查', desc: '校验内容长度是否达标、是否正确标注知识库来源', status: 'pending' },
+    { icon: '📝', title: '汇编输出', desc: '将新生成的章节替换到完整方案中，同步更新 Word/PDF 导出文件', status: 'pending' },
+  ];
+
+  // 在章节列表下方显示进度提示
+  const progressDiv = document.createElement('div');
+  progressDiv.style.cssText = 'font-size:11px;color:#2563eb;padding:4px 0 4px 24px;';
+  progressDiv.innerHTML = '⏳ <span id="curStep">正在检索知识库</span>...';
+  btnEl.parentElement.parentElement.appendChild(progressDiv);
+  
+  // 自动打开推理弹窗，先初始化显示步骤框架
+  $('reasoningContent').innerHTML = 
+    `<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+       <div style="padding:10px 14px;background:#fef9c3;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:500">
+         ⏳ <strong>🔍 调研员</strong>：正在检索知识库，匹配相关资料
+       </div>
+       <div style="padding:0 14px;background:#fefce8;border-bottom:1px solid #e5e7eb">
+         <div style="padding:8px 0;font-size:12px;color:#854d0e">
+           正在从项目知识库中检索相关资料片段...
+         </div>
+       </div>
+       <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+         ⚪ <strong>📊 分析师</strong>：分析资料，梳理写作思路
+       </div>
+       <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+         ⚪ <strong>✍️ 撰写员</strong>：组织语言，撰写正文
+       </div>
+       <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+         ⚪ <strong>🔍 校审员</strong>：审查优化，定稿输出
+       </div>
+     </div>`;
+  $('reasoningModal').style.display = 'flex';
+
+  // 初始化预览区，开始流式输出
+  $('preview').innerHTML = `
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;color:#6b7280;cursor:pointer" onclick="toggleReasoningPanel()">
+        🤔 <span id="reasoningLabel">正在思考...</span>（点击展开/收起）
+      </div>
+      <div id="reasoningPanel" style="display:none;background:#f3f4f6;padding:10px;border-radius:6px;font-size:12px;color:#6b7280;line-height:1.6;max-height:200px;overflow-y:auto;margin-top:6px;white-space:pre-wrap"></div>
+    </div>
+    <div id="streamContent" style="white-space:pre-wrap;font-size:13px;line-height:1.7"></div>
+  `;
+  const streamDiv = $('streamContent');
+  const reasoningPanel = $('reasoningPanel');
+  const reasoningLabel = $('reasoningLabel');
+  let fullContent = '';
+  let fullReasoning = '';
+  let citationsList = [];
+  let reviewData = null;
+
+  try {
+    // 使用 fetch 调用流式接口
+    const resp = await fetch(`/api/workflow/generate_chapter_stream?project_id=${current.id}&chapter_id=${cid}`, { method: 'POST' });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = JSON.parse(line.slice(6));
+
+        if (data.type === 'step') {
+          updateStep(data.step, data.status);
+          progressDiv.innerHTML = `⏳ ${data.msg}...（点击查看详细步骤）`;
+        } else if (data.type === 'review') {
+          // 后端校审的真实结论（单章体例 + 跨章节一致性），不是写死的文案
+          reviewData = data;
+        } else if (data.type === 'citations') {
+          citationsList = data.items || [];
+          progressDiv.innerHTML = `⏳ 已检索到 ${data.count} 条知识库引用，正在生成...`;
+          // 更新弹窗里调研员那一步的具体内容
+          $('reasoningContent').innerHTML = 
+            `<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+               <div style="padding:10px 14px;background:#dcfce7;border-bottom:1px solid #e5e7eb;font-size:13px">
+                 ✅ <strong>🔍 调研员</strong>：已检索知识库，匹配到 ${citationsList.length} 条参考资料
+               </div>
+               <div style="padding:0 14px;background:#f0fdf4;border-bottom:1px solid #e5e7eb">
+                 <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step1')">
+                   已整理成素材包，交付给分析师 <span style="float:right">▼ 收起</span>
+                 </div>
+                 <div id="step1" style="padding:8px 0;font-size:11px;color:#166534;line-height:1.6;max-height:150px;overflow-y:auto">
+                   ${citationsList.map((c, i) => `<div style="margin-bottom:8px;padding:6px;background:#fff;border-radius:4px"><div style="font-weight:500;margin-bottom:2px">${i+1}. ${c.source || '未知来源'}</div><div style="color:#4b5563">${c.text || ''}</div></div>`).join('')}
+                 </div>
+               </div>
+               <div style="padding:10px 14px;background:#fef9c3;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:500">
+                 ⏳ <strong>📊 分析师</strong>：正在分析资料，梳理写作思路
+               </div>
+               <div style="padding:0 14px;background:#fefce8;border-bottom:1px solid #e5e7eb">
+                 <div style="padding:8px 0;font-size:12px;color:#854d0e">
+                   正在提炼观点、构建逻辑框架...
+                 </div>
+               </div>
+               <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+                 ⚪ <strong>✍️ 撰写员</strong>：组织语言，撰写正文
+               </div>
+               <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+                   ⚪ <strong>🔍 校审员</strong>：审查优化，定稿输出
+               </div>
+             </div>`;
+        } else if (data.type === 'content') {
+          fullContent += data.delta;
+          if (data.reasoning_delta) {
+            fullReasoning += data.reasoning_delta;
+            reasoningPanel.textContent = fullReasoning;
+            reasoningLabel.textContent = '正在思考...';
+            // 4个智能体角色协同（逐章节生成，去掉主编）
+            $('reasoningContent').innerHTML = 
+              `<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+                 <div style="padding:10px 14px;background:#dcfce7;border-bottom:1px solid #e5e7eb;font-size:13px">
+                   ✅ <strong>🔍 调研员</strong>：已检索知识库，匹配到 ${citationsList.length} 条参考资料
+                 </div>
+                 <div style="padding:0 14px;background:#f0fdf4;border-bottom:1px solid #e5e7eb">
+                   <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step1')">
+                     已整理成素材包，交付给分析师 <span style="float:right">▶ 展开详情</span>
+                   </div>
+                   <div id="step1" style="display:none;padding:8px 0;font-size:11px;color:#166534;line-height:1.6;max-height:150px;overflow-y:auto">
+                     ${citationsList.map((c, i) => `<div style="margin-bottom:8px;padding:6px;background:#fff;border-radius:4px"><div style="font-weight:500;margin-bottom:2px">${i+1}. ${c.source || '未知来源'}</div><div style="color:#4b5563">${c.text || ''}</div></div>`).join('')}
+                   </div>
+                 </div>
+                 <div style="padding:10px 14px;background:#fef9c3;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:500">
+                   ⏳ <strong>📊 分析师</strong>：正在分析资料，梳理写作思路
+                 </div>
+                 <div style="padding:0 14px;background:#fefce8;border-bottom:1px solid #e5e7eb">
+                   <div style="padding:8px 0;font-size:12px;color:#854d0e;cursor:pointer" onclick="toggleStep('step2')">
+                     正在提炼观点、构建逻辑框架 <span style="float:right">▼ 收起</span>
+                   </div>
+                   <div id="step2" style="padding:8px 0;font-size:12px;color:#854d0e;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap">
+                     ${fullReasoning}
+                   </div>
+                 </div>
+                 <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+                   ⚪ <strong>✍️ 撰写员</strong>：组织语言，撰写正文
+                 </div>
+                 <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+                   ⚪ <strong>🔍 校审员</strong>：审查优化，定稿输出
+                 </div>
+               </div>`;
+          }
+          if (data.delta) {
+            fullContent += data.delta;
+            streamDiv.textContent = fullContent;
+            reasoningLabel.textContent = '思考完成，正在输出正文';
+            // 4个智能体角色协同（逐章节生成，去掉主编）
+            $('reasoningContent').innerHTML = 
+              `<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+                 <div style="padding:10px 14px;background:#dcfce7;border-bottom:1px solid #e5e7eb;font-size:13px">
+                   ✅ <strong>🔍 调研员</strong>：已检索知识库，匹配到 ${citationsList.length} 条参考资料
+                 </div>
+                 <div style="padding:0 14px;background:#f0fdf4;border-bottom:1px solid #e5e7eb">
+                   <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step1')">
+                     已整理成素材包，交付给分析师 <span style="float:right">▶ 展开详情</span>
+                   </div>
+                   <div id="step1" style="display:none;padding:8px 0;font-size:11px;color:#166534;line-height:1.6;max-height:150px;overflow-y:auto">
+                     ${citationsList.map((c, i) => `<div style="margin-bottom:8px;padding:6px;background:#fff;border-radius:4px"><div style="font-weight:500;margin-bottom:2px">${i+1}. ${c.source || '未知来源'}</div><div style="color:#4b5563">${c.text || ''}</div></div>`).join('')}
+                   </div>
+                 </div>
+                 <div style="padding:10px 14px;background:#dcfce7;border-bottom:1px solid #e5e7eb;font-size:13px">
+                   ✅ <strong>📊 分析师</strong>：已完成资料分析
+                 </div>
+                 <div style="padding:0 14px;background:#f0fdf4;border-bottom:1px solid #e5e7eb">
+                   <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step2')">
+                     已提炼核心观点，构建写作逻辑框架 <span style="float:right">▶ 展开详情</span>
+                   </div>
+                   <div id="step2" style="display:none;padding:8px 0;font-size:11px;color:#166534;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap">
+                     ${fullReasoning || '分析师正在分析资料，梳理写作思路...'}
+                   </div>
+                 </div>
+                 <div style="padding:10px 14px;background:#dbeafe;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:500">
+                   ⏳ <strong>✍️ 撰写员</strong>：正在组织语言，撰写正文
+                 </div>
+                 <div style="padding:0 14px;background:#eff6ff;border-bottom:1px solid #e5e7eb">
+                   <div style="padding:8px 0;font-size:12px;color:#1e40af;cursor:pointer" onclick="toggleStep('step3')">
+                     正在生成正文内容 <span style="float:right">▼ 收起</span>
+                   </div>
+                   <div id="step3" style="padding:8px 0;font-size:13px;color:#1e40af;line-height:1.7;max-height:200px;overflow-y:auto;white-space:pre-wrap">
+                     ${fullContent}
+                   </div>
+                 </div>
+                 <div style="padding:10px 14px;background:#f9fafb;font-size:13px;color:#9ca3af">
+                   ⚪ <strong>🔍 校审员</strong>：审查优化，定稿输出
+                 </div>
+               </div>`;
+          }
+          // 自动滚动到底部
+          $('preview').scrollTop = $('preview').scrollHeight;
+        } else if (data.type === 'done') {
+          updateStep(2, 'done'); updateStep(3, 'done'); updateStep(4, 'done');
+          let msg = `✅ 生成完成：${data.chars} 字，引用 ${data.citations} 条知识库内容`;
+          progressDiv.innerHTML = msg;
+          progressDiv.style.color = '#15803d';
+          // 生成结束后把预览区恢复为结构化全文预览（与导出的 Word 保持一致）
+          await loadFullPreview();
+          // 更新弹窗为最终完成状态
+          $('reasoningContent').innerHTML = 
+            `<div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+               <div style="padding:10px 14px;background:#dcfce7;border-bottom:1px solid #e5e7eb;font-size:13px">
+                 ✅ <strong>🔍 调研员</strong>：已检索知识库，匹配到 ${citationsList.length} 条参考资料
+               </div>
+               <div style="padding:0 14px;background:#f0fdf4;border-bottom:1px solid #e5e7eb">
+                 <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step1')">
+                   已整理成素材包，交付给分析师 <span style="float:right">▶ 展开详情</span>
+                 </div>
+                 <div id="step1" style="display:none;padding:8px 0;font-size:11px;color:#166534;line-height:1.6;max-height:150px;overflow-y:auto">
+                   ${citationsList.map((c, i) => `<div style="margin-bottom:8px;padding:6px;background:#fff;border-radius:4px"><div style="font-weight:500;margin-bottom:2px">${i+1}. ${c.source || '未知来源'}</div><div style="color:#4b5563">${c.text || ''}</div></div>`).join('')}
+                 </div>
+               </div>
+               <div style="padding:10px 14px;background:#dcfce7;border-bottom:1px solid #e5e7eb;font-size:13px">
+                 ✅ <strong>📊 分析师</strong>：已完成资料分析
+               </div>
+               <div style="padding:0 14px;background:#f0fdf4;border-bottom:1px solid #e5e7eb">
+                 <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step2')">
+                   已提炼核心观点，构建写作逻辑框架 <span style="float:right">▶ 展开详情</span>
+                 </div>
+                 <div id="step2" style="display:none;padding:8px 0;font-size:11px;color:#166534;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap">
+                   ${data.reasoning || '无思考记录'}
+                 </div>
+               </div>
+               <div style="padding:10px 14px;background:#dcfce7;border-bottom:1px solid #e5e7eb;font-size:13px">
+                 ✅ <strong>✍️ 撰写员</strong>：已完成正文撰写
+               </div>
+               <div style="padding:0 14px;background:#f0fdf4;border-bottom:1px solid #e5e7eb">
+                 <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step3')">
+                   已生成 ${data.chars} 字正文 <span style="float:right">▶ 展开详情</span>
+                 </div>
+                 <div id="step3" style="display:none;padding:8px 0;font-size:13px;color:#166534;line-height:1.7;max-height:200px;overflow-y:auto;white-space:pre-wrap">
+                   ${fullContent}
+                 </div>
+               </div>
+               ${(() => {
+                 const rv = reviewData || { passed: true, checks: [], issues: [] };
+                 const head = rv.passed
+                   ? '✅ <strong>🔍 校审员</strong>：审查通过（体例与跨章节口径一致）'
+                   : `⚠️ <strong>🔍 校审员</strong>：发现 ${rv.issues.length} 处问题`;
+                 const rows = (rv.checks || []).map(c =>
+                   `<div style="margin-bottom:4px">${c.ok ? '✅' : '⚠️'} ${c.name}：${c.detail}</div>`).join('');
+                 const issues = (rv.issues || []).length
+                   ? '<div style="margin-top:6px;color:#b45309">' + rv.issues.map(x => `· ${x}`).join('<br>') + '</div>'
+                   : '';
+                 return `<div style="padding:10px 14px;background:${rv.passed ? '#dcfce7' : '#fef3c7'};font-size:13px">${head}</div>
+               <div style="padding:0 14px;background:#f0fdf4">
+                 <div style="padding:8px 0;font-size:12px;color:#166534;cursor:pointer" onclick="toggleStep('step4')">
+                   ${rv.passed ? '格式、篇幅、重复与数字口径均已核对' : '问题清单（可据此重新生成本节）'} <span style="float:right">▶ 展开详情</span>
+                 </div>
+                 <div id="step4" style="display:none;padding:8px 0;font-size:11px;color:#166534;line-height:1.7">${rows}${issues}</div>
+               </div>`;
+               })()}
+             </div>`;
+          // 刷新章节列表，按钮从"生成"变成"查看"
+          await loadChapters();
+          await loadRecords();
+          await loadFullPreview();
+          setTimeout(() => progressDiv.remove(), 30000);
+        }
+      }
+    }
+  } catch (e) {
+    progressDiv.textContent = `❌ 生成失败：${e.message}`;
+    progressDiv.style.color = '#dc2626';
+    setTimeout(() => progressDiv.remove(), 5000);
+  } finally {
+    btnEl.disabled = false;
+    btnEl.textContent = oldText;
+    btnEl.style.opacity = '1';
+    window._genChapterId = null;
+  }
+}
+
+function updateStep(idx, status) {
+  window._genSteps[idx].status = status;
+}
+
+function showGenSteps() {
+  const stepsHtml = window._genSteps.map((s, i) => {
+    let icon = s.icon;
+    if (s.status === 'running') icon = '⏳';
+    if (s.status === 'done') icon = '✅';
+    if (s.status === 'pending') icon = '⚪';
+    return `<div class="step-item">
+      <span class="step-icon">${icon}</span>
+      <div>
+        <div class="step-title">${i+1}. ${s.title}</div>
+        <div class="step-desc">${s.desc}</div>
+      </div>
+    </div>`;
+  }).join('');
+  $('reasoningContent').innerHTML = stepsHtml;
+  document.querySelector('#reasoningModal .modal-header span').textContent = '🤖 智能体生成步骤';
+  $('reasoningModal').style.display = 'flex';
+}
+async function upload() {
+  if (!current) return alert('请先选择项目');
+  const files = $('files').files;
+  if (!files.length) return alert('请选择文件');
+  const tier = $('tier').value;
+  const fd = new FormData();
+  fd.append('tier', tier);
+  if (tier !== 'global') fd.append('project_id', current.id);
+  if (tier === 'chapter') {
+    const target = document.getElementById('chTarget');
+    if (!target) return alert('请先添加章节');
+    fd.append('chapter_id', target.value);
+  }
+  Array.from(files).forEach(f => fd.append('files', f));
+  const r = await api('/api/kb/ingest', { method:'POST', body: fd });
+  $('ingestMsg').innerHTML = `<div class="flash">入库 ${r.ingested} 块：` + r.files.map(x => `${esc(x.file)}=${x.chunks}`).join('，') + `</div>`;
+  $('files').value = '';
+  await loadStats();
+  await loadRecords();
+}
+async function loadStats() {
+  try { const s = await api('/api/kb/stats'); $('ingestMsg').innerHTML += `<div class="muted" style="margin-top:6px">统计：全局 ${s.tiers.global} / 项目 ${s.tiers.project} / 章节 ${s.tiers.chapter}</div>`; } catch(e) {}
+  await loadKbList();
+}
+async function loadKbList() {
+  try {
+    const url = '/api/kb/list' + (current ? `?project_id=${current.id}` : '');
+    const r = await api(url);
+    if (!r.docs.length) { $('kbList').innerHTML = '<div class="muted">暂无内容</div>'; return; }
+    const tierLabel = {global: '全局', project: '项目', chapter: '章节'};
+    const tierColor = {global: 'g', project: 'p', chapter: 'c'};
+    $('kbList').innerHTML = r.docs.map(d => {
+      const tag = `<span class="tag ${tierColor[d.tier] || 'g'}">${tierLabel[d.tier] || d.tier}</span>`;
+      const chunkCount = d.chunks.length;
+      return `<div class="item" style="flex-direction:column;align-items:flex-start;padding:8px 4px">
+        <div>${tag} <span style="font-size:12.5px">${esc(d.source || d.doc_id)}</span></div>
+        <div class="muted" style="font-size:11px;margin-top:2px">${chunkCount} 块内容</div>
+      </div>`;
+    }).join('');
+  } catch (e) { $('kbList').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+async function generate() {
+  if (!current) return alert('请先选择项目');
+  if (!await askRisk(`<div style="font-size:13px;line-height:1.9;color:#111">
+      <p style="margin:0 0 8px">整篇生成会逐章检索知识库并调用第三方大模型服务（DeepSeek）撰写正文，项目资料与知识库内容会离开本机。</p>
+      <p style="margin:0 0 8px">存在<b>数据外泄、被第三方留存</b>的风险，涉密或敏感内容请勿外发。</p>
+      <p style="margin:0">确定继续生成吗？</p>
+    </div>`)) return;
+  $('genMsg').innerHTML = '<div class="flash">正在生成方案（逐章节检索三级知识库 → 生成 → 审查 → 汇编）…</div>';
+  $('dlRow').innerHTML = '';
+  try {
+    const r = await api('/api/workflow/generate', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ project_id: current.id }) });
+    const chs = r.chapters.map(c => `${esc(c.code)} ${esc(c.title)}(${c.chars}字${c.review_ok?'✓':'·'+esc(c.issues.join('，'))})`).join('<br>');
+    $('genMsg').innerHTML = `<div class="flash">生成完成：${r.iterations} 轮修订，${r.chapters.length} 章。<br>${chs}</div>`;
+    $('dlRow').innerHTML =
+      `<a href="/api/export/${current.id}/docx" download><button>下载 Word</button></a>` +
+      `<a href="/api/export/${current.id}/pdf" download><button>下载 PDF</button></a>` +
+      `<a href="/api/export/${current.id}/md" download><button class="ghost">下载 Markdown</button></a>`;
+    await loadFullPreview();
+    await loadRecords();
+  } catch (e) { $('genMsg').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+loadProjects();
+</script>
+</body>
+</html>

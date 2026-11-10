@@ -1,0 +1,22 @@
+services:
+  app:
+    build: .
+    container_name: proposal-agent
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - EMBEDDING_PROVIDER=local
+      - KB_VECTOR_BACKEND=qdrant
+      - LLM_PROVIDER=local
+      # 生产建议：接 OpenAI 兼容嵌入与 LLM（豆包 / DeepSeek / 本地 vLLM）
+      # - EMBEDDING_PROVIDER=api
+      # - EMBEDDING_BASE_URL=https://...
+      # - EMBEDDING_API_KEY=...
+      # - EMBEDDING_MODEL=...
+      # - LLM_PROVIDER=api
+      # - LLM_BASE_URL=https://...
+      # - LLM_API_KEY=...
+      # - LLM_MODEL=...
+    restart: unless-stopped

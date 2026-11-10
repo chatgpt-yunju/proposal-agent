@@ -1,0 +1,19 @@
+[Unit]
+Description=写方案智能体 (FastAPI + LangGraph)
+After=network.target
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/proposal-agent
+Environment=PYTHONUNBUFFERED=1
+# 知识库向量库（1.2G）常驻内存，4G 机器容易吃紧；低于 4G 建议至少加一行 MemoryMax
+ExecStart=/home/user/proposal-agent/.venv/bin/python -u -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+# 长任务（整篇生成 / PDF 导出 300 页）不要被 systemd 超时打断
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+
+# 运行数据 / 大文件，不入库
+data/agent.db
+data/vector_db/
+data/tmp/
+data/exports/
+data/output/
+data/*.db
+data/*.bak*
+*.log
+*.out
+*.err
+_server.log*
+
+# 导出产物与界面截图
+*.docx
+*.pdf
+*.xlsx
+*.png
+_*.py
+_*.log
