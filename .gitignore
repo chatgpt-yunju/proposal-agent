@@ -5,12 +5,11 @@ __pycache__/
 .env
 
 # 运行数据 / 大文件，不入库
-data/agent.db
+# data/agent.db 例外：项目、章节与审计数据随仓库同步（约 2MB，不含密钥）
 data/vector_db/
 data/tmp/
 data/exports/
 data/output/
-data/*.db
 data/*.bak*
 *.log
 *.out
