@@ -207,24 +207,43 @@ class KnowledgeBase:
             },
         }
 
-    def list_docs(self, project_id: Optional[str] = None) -> List[dict]:
-        """按文档分组列出知识库内容，返回 [{doc_id, source, tier, chunk_count, samples}]。"""
+    def list_docs(self, project_id: Optional[str] = None, with_text: bool = False,
+                  max_chunks_per_doc: int = 3) -> List[dict]:
+        """按「层级 + 归属 + 文档」分组列出知识库内容。
+
+        分组键必须带 tier/project_id/chapter_id，不能只用 doc_id：
+        同一份资料常常既入了全局层、又被某个项目再入库一次（编制指南、法规原文、
+        同类规划案例都会这样），只用 doc_id 分组会把项目层并进同名的全局文档——
+        层级字段取自先遍历到的那一条（通常是全局），前端就只剩「全局」一类，
+        看起来像「三级知识库没同步过来」；更糟的是不同项目的同名文档会被并成一份，
+        列表里把 A 项目的内容显示在 B 项目下面。
+
+        with_text=False 时不返回分块正文，只给 chunk_count：全库 19869 块原文
+        拼进一次响应是 10 MB 级，前端列表只用到条数与来源，没必要传正文。
+        """
         all_items = self.store.list_all()
-        # 按 doc_id 分组
         docs = {}
         for cid, pay, _ in all_items:
-            doc_id = pay.get("doc_id", "unknown")
-            if doc_id not in docs:
-                docs[doc_id] = {
+            tier = pay.get("tier") or ""
+            pid = pay.get("project_id") or ""
+            chid = pay.get("chapter_id") or ""
+            doc_id = pay.get("doc_id") or "unknown"
+            key = (tier, pid, chid, doc_id)
+            doc = docs.get(key)
+            if doc is None:
+                doc = docs[key] = {
                     "doc_id": doc_id,
                     "source": pay.get("source", ""),
                     "title": pay.get("title", ""),
-                    "tier": pay.get("tier", ""),
-                    "project_id": pay.get("project_id", ""),
-                    "chapter_id": pay.get("chapter_id", ""),
+                    "tier": tier,
+                    "project_id": pid,
+                    "chapter_id": chid,
+                    "chunk_count": 0,
                     "chunks": [],
                 }
-            docs[doc_id]["chunks"].append(pay.get("text", ""))
+            doc["chunk_count"] += 1
+            if with_text and len(doc["chunks"]) < max_chunks_per_doc:
+                doc["chunks"].append(pay.get("text", ""))
 
         # 过滤：如果指定了 project_id，只返回该项目相关的 + 全局的
         result = []
@@ -235,7 +254,7 @@ class KnowledgeBase:
             else:
                 result.append(doc)
 
-        # 按 tier 排序：global → project → chapter
+        # 按 tier 排序：global → project → chapter；同层内按来源、归属稳定排序
         tier_order = {"global": 0, "project": 1, "chapter": 2}
-        result.sort(key=lambda x: (tier_order.get(x["tier"], 9), x["source"]))
+        result.sort(key=lambda x: (tier_order.get(x["tier"], 9), x["source"], x["project_id"], x["chapter_id"]))
         return result

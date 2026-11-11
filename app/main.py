@@ -463,8 +463,9 @@ def stats():
 
 
 @app.get("/api/kb/list")
-def kb_list(project_id: Optional[str] = None):
-    docs = kb.list_docs(project_id)
+def kb_list(project_id: Optional[str] = None, with_text: bool = False):
+    """列出知识库文档。with_text=0（默认）只返回条数与来源，避免把全库原文塞进一次响应。"""
+    docs = kb.list_docs(project_id, with_text=with_text)
     return {"docs": docs, "total": len(docs)}
 
 

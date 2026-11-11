@@ -1518,7 +1518,8 @@ async function loadKbList() {
     const tierColor = {global: 'g', project: 'p', chapter: 'c'};
     $('kbList').innerHTML = r.docs.map(d => {
       const tag = `<span class="tag ${tierColor[d.tier] || 'g'}">${tierLabel[d.tier] || d.tier}</span>`;
-      const chunkCount = d.chunks.length;
+      // 列表只用条数：/api/kb/list 默认不回传分块正文（全库原文 10MB 级，列表用不上）
+      const chunkCount = d.chunk_count ?? d.chunks.length;
       return `<div class="item" style="flex-direction:column;align-items:flex-start;padding:8px 4px">
         <div>${tag} <span style="font-size:12.5px">${esc(d.source || d.doc_id)}</span></div>
         <div class="muted" style="font-size:11px;margin-top:2px">${chunkCount} 块内容</div>
