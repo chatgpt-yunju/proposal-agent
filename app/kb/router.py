@@ -22,6 +22,44 @@ class KnowledgeBase:
             settings.embedding_model,
             settings.embedding_local_dim,
         )
+        # BM25 索引是纯内存结构，进程重启后会清空；从已落盘的向量库重建，
+        # 否则混合检索会退化成只有稠密一路，召回质量明显下降。
+        self._rebuild_sparse()
+
+    def _rebuild_sparse(self) -> None:
+        try:
+            items = self.store.list_all()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("重建 BM25 索引失败：读取向量库异常", exc_info=True)
+            return
+        if not items:
+            return
+        import time
+        t0 = time.time()
+        chunks: List[Chunk] = []
+        for cid, pay, _ in items:
+            text = pay.get("text") or ""
+            if not text:
+                continue
+            chunks.append(Chunk(
+                id=str(cid),
+                text=text,
+                scope=Scope(
+                    tier=pay.get("tier") or "global",
+                    project_id=pay.get("project_id") or None,
+                    chapter_id=pay.get("chapter_id") or None,
+                ),
+                doc_id=pay.get("doc_id") or "",
+                source=pay.get("source") or "",
+                title=pay.get("title") or "",
+            ))
+        if chunks:
+            self.sparse.add(chunks)
+            import logging
+            logging.getLogger(__name__).info(
+                "BM25 索引已重建：%d 条，耗时 %.2fs", len(chunks), time.time() - t0
+            )
 
     # ---------- 入库 ----------
     def ingest_chunks(self, chunks: List[Chunk]) -> int:
@@ -45,7 +83,20 @@ class KnowledgeBase:
         ]
         self.store.upsert([c.id for c in chunks], vecs, payloads)
         self.sparse.add(chunks)
+        # flat 后端把增量放在内存 pending 里、累计 200 条才落盘；
+        # 入库后立即 flush，保证进程重启不丢知识库数据。
+        self.flush()
         return len(chunks)
+
+    def flush(self) -> None:
+        """把向量库的内存增量落盘（无 flush 能力的后端为空操作）。"""
+        fn = getattr(self.store, "flush", None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("向量库 flush 失败", exc_info=True)
 
     def ingest_file(self, path: str, tier: str, project_id: Optional[str] = None,
                     chapter_id: Optional[str] = None, doc_id: Optional[str] = None,

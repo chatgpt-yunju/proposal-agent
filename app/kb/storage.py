@@ -294,6 +294,12 @@ class FlatStore(VectorStore):
     def count(self, scope: Optional[Scope] = None) -> int:
         if scope is None:
             return len(self._meta) + len(self._extra)
+        # 按 tier 聚合统计（stats 场景）：未指定 project_id/chapter_id 时，
+        # 只按 tier 过滤，不能退化成精确 key 匹配——否则 Scope("project") 会恒为 0。
+        if not scope.project_id and not scope.chapter_id:
+            n = sum(1 for m in self._meta if (m.get('tier') or '') == scope.tier)
+            n += sum(1 for m, _ in self._extra if (m.get('tier') or '') == scope.tier)
+            return n
         n = int(self._scope_mask(scope).size)
         k = (scope.tier, scope.project_id or '', scope.chapter_id or '')
         n += sum(1 for m, _ in self._extra
