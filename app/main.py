@@ -86,6 +86,11 @@ async def lifespan(_: FastAPI):
     db.init_db()
     _backfill_generation_records()
     yield
+    # 退出前把向量库内存增量落盘，避免重启丢数据
+    try:
+        kb.flush()
+    except Exception:
+        logger.warning("退出时向量库 flush 失败", exc_info=True)
 
 
 app = FastAPI(title="写方案智能体 · 三级知识库核心", version="0.1.0", lifespan=lifespan)
@@ -270,66 +275,94 @@ def _docx_to_template_text(path: str) -> str:
     return "\n".join(lines)
 
 
+TEMPLATE_MAX_BYTES = 30 * 1024 * 1024  # 30 MB：模板是章节骨架，超出这个量级基本是误传正文
+
+
+def _assert_docx_payload(content: bytes, filename: str) -> None:
+    """模板入口的格式闸门：只放行真正的 .docx。
+
+    三重校验，避免只改扩展名或空文件混进来：
+    1. 扩展名必须是 .docx（.doc / .md / .pdf 一律拒绝并给出可操作提示）；
+    2. ZIP 魔数 PK\\x03\\x04 —— Office Open XML 本质是 zip 容器，旧版 .doc 是 OLE 复合文档（D0 CF 11 E0）；
+    3. 包内必须存在 word/document.xml，否则是改了后缀的其它 zip。
+    """
+    import zipfile
+    import io as _io
+
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext == ".doc":
+        raise HTTPException(
+            422,
+            "不支持旧版 .doc（Word 97-2003）模板，请在 Word 中「另存为」.docx 后再上传",
+        )
+    if ext != ".docx":
+        raise HTTPException(
+            422,
+            f"模板仅支持 Word（.docx）格式，当前文件类型为 {ext or '未知'}",
+        )
+    if not content:
+        raise HTTPException(422, "上传的模板文件为空")
+    if len(content) > TEMPLATE_MAX_BYTES:
+        raise HTTPException(
+            413,
+            f"模板文件过大（{len(content) / 1024 / 1024:.1f} MB），上限 {TEMPLATE_MAX_BYTES // 1024 // 1024} MB",
+        )
+    if not content.startswith(b"PK\x03\x04"):
+        raise HTTPException(
+            422,
+            "文件内容不是有效的 .docx（疑似把其它格式改了扩展名），请用 Word 另存为 .docx",
+        )
+    try:
+        with zipfile.ZipFile(_io.BytesIO(content)) as zf:
+            names = zf.namelist()
+    except zipfile.BadZipFile:
+        raise HTTPException(422, "文件已损坏或不是有效的 .docx 压缩包")
+    if "word/document.xml" not in names:
+        raise HTTPException(
+            422,
+            "文件缺少 word/document.xml，不是标准的 Word 文档",
+        )
+
+
 @app.post("/api/projects/{pid}/upload_template")
 def upload_template(pid: str, file: UploadFile = File(...)):
-    """上传方案模板（docx/md），自动解析章节结构并批量创建章节。"""
+    """上传方案模板（仅 .docx），自动解析章节结构、采集版式并批量创建章节。
+
+    格式限制：只收 Word（.docx）。历史版本还支持 .md/.txt/.pdf，但 PDF 抽文本靠
+    启发式猜标题、markdown 无法携带字体字号与编号定义，两者都无法驱动「按模板版式导出」，
+    因此收口为单一入口，避免产出格式漂移。
+    """
     if not db.get_project(pid):
         raise HTTPException(404, "项目不存在")
 
-    filename = file.filename or "template.md"
-    ext = os.path.splitext(filename)[1].lower()
+    filename = file.filename or ""
     content = file.file.read()
-    template_style = None
+    _assert_docx_payload(content, filename)
 
-    # 解析文本
-    if ext in (".md", ".markdown", ".txt"):
-        text = content.decode("utf-8", errors="ignore")
-    elif ext == ".docx":
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
-        tmp.write(content)
-        tmp.close()
-        try:
-            # 关键：同一份模板里既解析章节结构，也采集标题/正文样式与编号定义，
-            # 这样导出 Word/PDF 和网页预览都按模板自己的规则渲染，而不是写死一套公文样式。
-            template_style = extract_from_docx(tmp.name)
-            template_style["source"] = f"docx:{os.path.basename(filename)}"
-            text = _docx_to_template_text(tmp.name)
-        finally:
-            os.unlink(tmp.name)
-    elif ext == ".pdf":
-        import tempfile
-        import pymupdf
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        tmp.write(content)
-        tmp.close()
-        try:
-            lines = []
-            with pymupdf.open(tmp.name) as doc:
-                for page in doc:
-                    page_text = page.get_text("text")
-                    for line in page_text.split("\n"):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        # PDF 中识别可能的标题行：较短的行、以数字开头的行
-                        if (len(line) < 50 and
-                            (re.match(r"^\d+[\.\、\s]", line) or
-                             re.match(r"^第[一二三四五六七八九十\d]+[章节]", line) or
-                             (len(line) < 20 and not line.endswith("。")))):
-                            lines.append(f"## {line}")
-                        else:
-                            lines.append(line)
-            text = "\n".join(lines)
-        finally:
-            os.unlink(tmp.name)
-    else:
-        raise HTTPException(422, "暂不支持该模板格式，请上传 .md / .docx / .pdf 文件")
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+    tmp.write(content)
+    tmp.close()
+    try:
+        # 关键：同一份模板里既解析章节结构，也采集标题/正文样式与编号定义，
+        # 这样导出 Word/PDF 和网页预览都按模板自己的规则渲染，而不是写死一套公文样式。
+        template_style = extract_from_docx(tmp.name)
+        template_style["source"] = f"docx:{os.path.basename(filename)}"
+        text = _docx_to_template_text(tmp.name)
+    except HTTPException:
+        raise
+    except Exception as exc:  # python-docx 对损坏文件抛各种异常，统一转成 422
+        raise HTTPException(422, f"模板解析失败，请确认文件可在 Word 中正常打开：{exc}")
+    finally:
+        os.unlink(tmp.name)
 
     # 解析章节
     chapters = _parse_template_chunks(text)
     if not chapters:
-        raise HTTPException(400, "未从模板中识别到章节结构（请使用 ## 标题或 Heading 样式标记章节）")
+        raise HTTPException(
+            400,
+            "未从模板中识别到章节结构：请在 Word 里用「标题 1 / 标题 2 …」样式标记章节后再上传",
+        )
 
     # 批量创建/更新章节（已存在则更新层级）
     existing = db.list_chapters(pid)

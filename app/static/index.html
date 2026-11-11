@@ -88,9 +88,9 @@
     <div class="btn-row" style="margin-bottom:8px">
       <label class="ghost" style="padding:7px 14px;border-radius:6px;background:#f3f4f6;color:#374151;font-size:13px;cursor:pointer">
         上传模板自动解析
-        <input type="file" id="templateFile" accept=".md,.docx,.pdf" style="display:none" onchange="uploadTemplate()">
+        <input type="file" id="templateFile" accept=".docx" style="display:none" onchange="uploadTemplate()">
       </label>
-      <span class="muted" style="font-size:11px;align-self:center">支持 .md / .docx / .pdf</span>
+      <span class="muted" style="font-size:11px;align-self:center">仅支持 Word（.docx）</span>
     </div>
     <input id="chCode" placeholder="章节编号，如 03" style="width:90px;display:inline-block">
     <input id="chTitle" placeholder="章节标题，如 技术架构方案" style="width:200px;display:inline-block">
@@ -1065,6 +1065,21 @@ async function uploadTemplate() {
   if (!current) return alert('请先选择项目');
   const file = $('templateFile').files[0];
   if (!file) return;
+  // 前端先拦一道：只允许 Word（.docx）。后端还有扩展名 + ZIP 魔数 + word/document.xml 三重校验，
+  // 这里只负责把明显不对的文件挡在发送之前，省一次 30MB 级上传往返。
+  const lower = (file.name || '').toLowerCase();
+  if (lower.endsWith('.doc')) {
+    $('templateFile').value = '';
+    return alert('不支持旧版 .doc（Word 97-2003）模板。\n请在 Word 中「另存为」.docx 后再上传。');
+  }
+  if (!lower.endsWith('.docx')) {
+    $('templateFile').value = '';
+    return alert('模板仅支持 Word（.docx）格式，当前文件不是 .docx。');
+  }
+  if (file.size > 30 * 1024 * 1024) {
+    $('templateFile').value = '';
+    return alert(`模板文件过大（${(file.size / 1024 / 1024).toFixed(1)} MB），上限 30 MB。`);
+  }
   const fd = new FormData();
   fd.append('file', file);
   try {
@@ -1099,7 +1114,8 @@ async function uploadTemplate() {
     await loadFullPreview();
     await loadRecords();
   } catch (e) {
-    alert('模板解析失败：' + e.message);
+    // 后端 4xx 的 detail 已是完整中文说明（格式不符 / 解析失败 / 无章节结构），直接透出，不再叠前缀
+    alert('上传未完成：' + e.message);
   }
   $('templateFile').value = '';
 }

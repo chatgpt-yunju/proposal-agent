@@ -85,6 +85,7 @@ docker compose up --build -d     # 映射 8000 端口，数据卷 ./data:/app/da
 | --- | --- |
 | `POST /api/projects` | 创建项目 |
 | `POST /api/projects/{pid}/chapters` | 创建章节 |
+| `POST /api/projects/{pid}/upload_template` | 上传模板（form：file）。**仅收 Word `.docx`**，解析章节结构 + 采集标题/正文样式与编号定义；`.doc` / `.md` / `.pdf` 一律 422 |
 | `POST /api/kb/ingest` | 上传文件入库（form：tier、project_id、chapter_id、files） |
 | `POST /api/kb/retrieve` | 三级检索（json：query、project_id、chapter_id、top_k） |
 | `GET /api/kb/stats` | 各级知识库统计 |
