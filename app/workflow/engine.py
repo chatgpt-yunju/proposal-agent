@@ -52,19 +52,24 @@ class ProposalWorkflow:
         return {"retrievals": retrievals, "drafts": drafts}
 
     def _review_all(self, state: ProposalState) -> Dict:
-        """审查每个章节：内容长度、是否标注知识库来源。问题列表为空表示通过。"""
+        """审查每个章节：篇幅是否达标、是否混入引用标注。
+
+        历史实现要求正文「包含来源文件名」，与提示词里「禁止出现【来源：…】标注」直接冲突，
+        导致模型被逼着把引用标记塞回正文、正式方案满篇（【来源：xxx.docx，project级】）。
+        现在口径统一为：不许标来源，只校验篇幅与标注泄漏。
+        """
+        from ..llm.chat import _target_chars
+        floor = int(_target_chars() * 0.6)
         reviews: Dict[str, List[str]] = {}
         for ch in state["chapters"]:
             cid = ch["id"]
             draft = state["drafts"].get(cid, "")
-            sources = [c.get("source", "") for c in state["retrievals"].get(cid, [])]
+            body = re.sub(r"\s+", "", draft)
             issues: List[str] = []
-            if len(draft.strip()) < 100:
-                issues.append("章节内容过短（不足 100 字）")
-            keys = [k for k in (_source_key(s) for s in sources) if k]
-            draft_flat = re.sub(r"\s+", "", draft)
-            if keys and not any(k in draft_flat for k in keys):
-                issues.append("未标注知识库来源（应包含来源文件名）")
+            if len(body) < floor:
+                issues.append(f"篇幅不足（{len(body)} 字，目标不少于 {floor} 字），需补充实质内容")
+            if re.search(r"(【\s*来源|［\s*来源|\[来源|（\s*来源|来源\s*[:：])", draft or ""):
+                issues.append("正文混入引用标注，需删除")
             reviews[cid] = issues
         return {"reviews": reviews}
 

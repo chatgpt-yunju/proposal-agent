@@ -5,9 +5,20 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional, Protocol
 
 import httpx
+
+
+def _target_chars() -> int:
+    """每章正文目标字数。政府方案类文档按篇幅惯例一节约 1,500~2,000 字，
+    由 CHAPTER_TARGET_CHARS 覆盖（默认 1800），下调/上调用于统一全篇篇幅口径。"""
+    try:
+        n = int(os.environ.get("CHAPTER_TARGET_CHARS", "1800"))
+    except ValueError:
+        n = 1800
+    return max(300, min(n, 6000))
 
 
 class ChatProvider(Protocol):
@@ -35,10 +46,12 @@ class ApiChat:
             raise ValueError("LLM_PROVIDER=api 需配置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL")
 
     def _fallback(self, chapter: Dict, project_name: str, citations: List[Dict]) -> str:
-        """模型不可用时的降级：用检索到的知识库要点结构化组装，保证方案不崩、章节不丢。"""
-        code, title = chapter.get("code", ""), chapter.get("title", "")
-        lines = [f"## {code} {title}", "",
-                 "> 说明：本章模型响应超时，暂由知识库检索要点组装，可稍后重跑获取成文。", ""]
+        """模型不可用时的降级：用检索到的知识库要点结构化组装，保证方案不崩、章节不丢。
+
+        只返回纯正文（标题由调用方拼接），且不带【来源：…】标注——正式方案不留引用标记，
+        引用关系由 /api/projects/{pid}/records 里的检索记录回溯。
+        """
+        lines = [f"> 说明：本章模型响应超时，暂由知识库检索要点组装，可稍后重跑获取成文。", ""]
         for c in citations:
             text = (c.get("text") or "").strip()
             if text:
@@ -61,6 +74,8 @@ class ApiChat:
         if issues:
             extra = "\n针对以下审查问题补足与修正：\n" + "\n".join(f"- {x}" for x in issues)
 
+        target = _target_chars()
+        lo, hi = int(target * 0.9), int(target * 1.15)
         system = (
             "你是资深国土空间规划方案编写专家，撰写政府正式实施方案。"
             "风格要求：完全仿照政府公文/工程实施方案的写作风格，语言正式严谨。\n"
@@ -68,23 +83,27 @@ class ApiChat:
             "1. 只输出正文内容，绝对不要输出任何标题、小标题、编号；\n"
             "2. 绝对不要在正文里出现【来源：xxx】、[来源: xxx]、（来源：xxx）之类的任何引用标注；\n"
             "3. 不要分小节，就直接写连贯的正文内容；\n"
-            "4. 篇幅根据章节内容灵活调整：重要章节可以写得充实详细，一般性章节写得简洁精炼，整体保持政府公文的篇幅惯例；\n"
+            f"4. 篇幅要求：本章正文不少于 {lo} 字、不超过 {hi} 字；分 3~6 个自然段展开，"
+            "首段写总体判断与依据，中段写具体任务、指标与措施，末段写组织实施或保障要求；"
+            "不得用空话、套话、重复表述凑字数，每一段都要有实质信息（数据、任务、时限、责任主体）；\n"
             "5. 内容要和参考资料里的事实、数据一致，不要编造，不要啰嗦重复；\n"
-            "6. 若本节需要罗列多项并列数据（项目清单、面积与投资明细、指标对比、分年度安排等），"
+            "6. 只采用与本章主题、本项目专业领域一致的资料，与本章无关的资料（例如别的专业领域的方案）不要引用；\n"
+            "7. 若本节需要罗列多项并列数据（项目清单、面积与投资明细、指标对比、分年度安排等），"
             "必须输出标准 Markdown 表格：第一行为表头，第二行为 | --- | 分隔行，"
             "其后每行一条记录、单元格用 | 分隔；表格下方再补一段文字说明。没有并列数据时不要强行造表；\n"
-            "7. 表格上方必须单独一行写表名，格式为「表：<表名>」，例如「表：历口镇现状人口结构统计表」，"
+            "8. 表格上方必须单独一行写表名，格式为「表：<表名>」，例如「表：历口镇现状人口结构统计表」，"
             "表名要具体到能看懂内容，不要自己写表号（表号由系统按章节顺序自动生成）；\n"
-            "8. 正文里提到表格时同样不要写具体表号（不要出现「见表1-3-7」这类写法），"
+            "9. 正文里提到表格时同样不要写具体表号（不要出现「见表1-3-7」这类写法），"
             "用「见下表」「具体见下文表格」表述即可，避免与系统自动生成的表号对不上"
         )
         user = (
             f"项目：{project_name}\n"
             f"待撰写章节：{chapter.get('title','')}\n"
-            f"章节要求：{chapter.get('description','（依据项目资料自行组织）')}\n"
+            f"章节要求：{chapter.get('description') or '（依据项目资料自行组织）'}\n"
             f"{extra}\n"
             f"参考资料（直接引用其中的事实和数据，不要标注来源）：\n{context}\n"
-            "请直接输出该章节的正文内容，不要带任何标题，仿照政府实施方案的公文风格，篇幅根据内容需要灵活调整。"
+            f"请直接输出该章节的正文内容，不要带任何标题，仿照政府实施方案的公文风格，"
+            f"正文控制在 {lo}~{hi} 字之间。"
         )
 
         payload = {
@@ -245,6 +264,8 @@ class ApiChat:
         if issues:
             extra = "\n针对以下审查问题补足与修正：\n" + "\n".join(f"- {x}" for x in issues)
 
+        target = _target_chars()
+        lo, hi = int(target * 0.9), int(target * 1.15)
         system = (
             "你是资深国土空间规划方案编写专家，撰写政府正式实施方案。"
             "风格要求：完全仿照政府公文/工程实施方案的写作风格，语言正式严谨。\n"
@@ -252,23 +273,27 @@ class ApiChat:
             "1. 只输出正文内容，绝对不要输出任何标题、小标题、编号；\n"
             "2. 绝对不要在正文里出现【来源：xxx】、[来源: xxx]、（来源：xxx）之类的任何引用标注；\n"
             "3. 不要分小节，就直接写连贯的正文内容；\n"
-            "4. 篇幅根据章节内容灵活调整：重要章节可以写得充实详细，一般性章节写得简洁精炼，整体保持政府公文的篇幅惯例；\n"
+            f"4. 篇幅要求：本章正文不少于 {lo} 字、不超过 {hi} 字；分 3~6 个自然段展开，"
+            "首段写总体判断与依据，中段写具体任务、指标与措施，末段写组织实施或保障要求；"
+            "不得用空话、套话、重复表述凑字数，每一段都要有实质信息（数据、任务、时限、责任主体）；\n"
             "5. 内容要和参考资料里的事实、数据一致，不要编造，不要啰嗦重复；\n"
-            "6. 若本节需要罗列多项并列数据（项目清单、面积与投资明细、指标对比、分年度安排等），"
+            "6. 只采用与本章主题、本项目专业领域一致的资料，与本章无关的资料（例如别的专业领域的方案）不要引用；\n"
+            "7. 若本节需要罗列多项并列数据（项目清单、面积与投资明细、指标对比、分年度安排等），"
             "必须输出标准 Markdown 表格：第一行为表头，第二行为 | --- | 分隔行，"
             "其后每行一条记录、单元格用 | 分隔；表格下方再补一段文字说明。没有并列数据时不要强行造表；\n"
-            "7. 表格上方必须单独一行写表名，格式为「表：<表名>」，例如「表：历口镇现状人口结构统计表」，"
+            "8. 表格上方必须单独一行写表名，格式为「表：<表名>」，例如「表：历口镇现状人口结构统计表」，"
             "表名要具体到能看懂内容，不要自己写表号（表号由系统按章节顺序自动生成）；\n"
-            "8. 正文里提到表格时同样不要写具体表号（不要出现「见表1-3-7」这类写法），"
+            "9. 正文里提到表格时同样不要写具体表号（不要出现「见表1-3-7」这类写法），"
             "用「见下表」「具体见下文表格」表述即可，避免与系统自动生成的表号对不上"
         )
         user = (
             f"项目：{project_name}\n"
             f"待撰写章节：{chapter.get('title','')}\n"
-            f"章节要求：{chapter.get('description','（依据项目资料自行组织）')}\n"
+            f"章节要求：{chapter.get('description') or '（依据项目资料自行组织）'}\n"
             f"{extra}\n"
             f"参考资料（直接引用其中的事实和数据，不要标注来源）：\n{context}\n"
-            "请直接输出该章节的正文内容，不要带任何标题，仿照政府实施方案的公文风格，篇幅根据内容需要灵活调整。"
+            f"请直接输出该章节的正文内容，不要带任何标题，仿照政府实施方案的公文风格，"
+            f"正文控制在 {lo}~{hi} 字之间。"
         )
 
         payload = {
@@ -320,24 +345,22 @@ class LocalChat:
 
     def generate_chapter(self, *, chapter: Dict, project_name: str,
                          citations: List[Dict], issues: Optional[List[str]] = None) -> str:
-        title = chapter.get("title", "")
-        code = chapter.get("code", "")
-        lines = [f"## {code} {title}", ""]
+        """离线兜底：只返回纯正文（标题由调用方拼接），不带引用标注。"""
+        req = (chapter.get("description") or "").strip()
+        lines = []
         if issues:
             lines.append(f"> 修订说明：{'; '.join(issues)}")
             lines.append("")
         lines.append(
             f"本章基于项目《{project_name}》与三级知识库检索内容编制，"
-            f"围绕“{chapter.get('description','本项目的相关章节要求')}”展开如下："
+            + (f"围绕“{req}”展开如下：" if req else "主要内容如下：")
         )
         lines.append("")
         if not citations:
             lines.append("（本章暂无可引用知识，待补充入库后重跑。）")
         else:
             for c in citations:
-                src = c.get("source", "")
-                tier = c.get("tier", "")
-                text = c.get("text", "").strip()
+                text = (c.get("text") or "").strip()
                 if text:
                     lines.append(f"- {text}")
         lines.append("")
