@@ -42,6 +42,8 @@ class ApiChat:
         self.model = model
         self.timeout = timeout
         self._last_reasoning = ""
+        # 本次生成是否走了降级兜底（供调用方判断：兜底文本不要覆盖已生成正文）
+        self._last_fallback = False
         if not (base_url and api_key and model):
             raise ValueError("LLM_PROVIDER=api 需配置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL")
 
@@ -50,7 +52,11 @@ class ApiChat:
 
         只返回纯正文（标题由调用方拼接），且不带【来源：…】标注——正式方案不留引用标记，
         引用关系由 /api/projects/{pid}/records 里的检索记录回溯。
+
+        注意：这是「难看但可用」的兜底文本，调用方必须通过 _last_fallback 识别它，
+        不要拿它覆盖已生成的正文。
         """
+        self._last_fallback = True
         lines = [f"> 说明：本章模型响应超时，暂由知识库检索要点组装，可稍后重跑获取成文。", ""]
         for c in citations:
             text = (c.get("text") or "").strip()
@@ -60,6 +66,7 @@ class ApiChat:
 
     def generate_chapter(self, *, chapter: Dict, project_name: str,
                          citations: List[Dict], issues: Optional[List[str]] = None) -> str:
+        self._last_fallback = False
         if not citations:
             # 只返回纯正文：标题由调用方统一拼接，避免出现双重标题
             return "（未检索到可引用的知识库内容，待补充入库后重跑。）"

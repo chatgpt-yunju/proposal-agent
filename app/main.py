@@ -28,6 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 降级兜底文本的特征串：出现即说明本次不是真实模型产出，不能写库覆盖已有正文
+_DEGRADED_MARK = "本章模型响应超时"
+
 from . import db
 from .config import settings
 from .kb.models import Scope
@@ -605,6 +608,10 @@ async def generate_chapter_stream(project_id: str, chapter_id: str):
         ch_code = target["code"]
         # LLM 只生成纯正文，我们自己拼接标题；来源标注一律剥掉，正文不留引用
         body = strip_source_marks(full_content.strip())
+        # 降级兜底文本（模型超时拼装的检索要点）不落库，避免把已生成的正文冲成碎片
+        if _DEGRADED_MARK in body:
+            yield f"data: {json.dumps({'type': 'error', 'msg': '模型响应超时，本章原正文未改动，请重试'}, ensure_ascii=False)}\n\n"
+            return
         new_chapter = f"## {ch_code} {ch_title}\n\n{body}"
 
         # 正则匹配：从该章节标题开始，到下一个 ## 或文件结束
@@ -687,6 +694,13 @@ def generate_single_chapter(project_id: str, chapter_id: str):
     reasoning = getattr(chat, '_last_reasoning', '')
     # 来源标注一律剥掉：正文章节里不保留【来源：…】这类引用痕迹
     draft = strip_source_marks(draft)
+
+    # 降级兜底文本不许覆盖已有正文：模型超时/连续失败时 generate_chapter 会返回
+    # 「> 说明：本章模型响应超时…」的拼装内容，若照常写库会把原本成文的章节冲成碎片。
+    if getattr(chat, '_last_fallback', False) or _DEGRADED_MARK in draft:
+        audit(project_id, "chapter_generate", target["title"], "failed",
+              detail="模型响应超时触发降级兜底，已保留原正文未覆盖", chapter_id=chapter_id)
+        raise HTTPException(502, "模型响应超时（本章原正文已保留，未被覆盖），请稍后重试")
 
     # 校审：单章体例 + 与其他已生成章节的一致性
     review = review_chapter(draft, _review_siblings(project_id, chapter_id))
