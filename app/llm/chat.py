@@ -42,7 +42,7 @@ class ApiChat:
         for c in citations:
             text = (c.get("text") or "").strip()
             if text:
-                lines.append(f"- {text[:300]}（【来源：{c.get('source', '')}】）")
+                lines.append(f"- {text[:300]}")
         return "\n".join(lines)
 
     def generate_chapter(self, *, chapter: Dict, project_name: str,
@@ -339,9 +339,9 @@ class LocalChat:
                 tier = c.get("tier", "")
                 text = c.get("text", "").strip()
                 if text:
-                    lines.append(f"- {text}（【来源：{src}，{tier}级】）")
+                    lines.append(f"- {text}")
         lines.append("")
-        lines.append("以上要点均检索自本项目知识库，引用可回溯至原始文档。")
+        lines.append("以上要点整理自本项目知识库资料。")
         return "\n".join(lines)
 
 

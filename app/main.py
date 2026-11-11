@@ -36,7 +36,7 @@ from .llm.chat import build_chat
 from .workflow import ProposalWorkflow
 from .export import export_proposal, md_to_docx, md_to_pdf
 from .template_style import DEFAULT_STYLE, extract_from_docx, number_chapters
-from .review import review_chapter
+from .review import review_chapter, strip_source_marks
 from .schemas import (
     ChapterCreate,
     ChapterGenOut,
@@ -569,8 +569,8 @@ async def generate_chapter_stream(project_id: str, chapter_id: str):
         paths = _proposal_paths(proj["name"])
         ch_title = target["title"]
         ch_code = target["code"]
-        # LLM 只生成纯正文，我们自己拼接标题
-        body = full_content.strip()
+        # LLM 只生成纯正文，我们自己拼接标题；来源标注一律剥掉，正文不留引用
+        body = strip_source_marks(full_content.strip())
         new_chapter = f"## {ch_code} {ch_title}\n\n{body}"
 
         # 正则匹配：从该章节标题开始，到下一个 ## 或文件结束
@@ -651,6 +651,8 @@ def generate_single_chapter(project_id: str, chapter_id: str):
         # 把真实原因带回前端，避免批量生成时只能看到 "HTTP 500"
         raise HTTPException(500, f"生成失败：{str(e)[:200]}")
     reasoning = getattr(chat, '_last_reasoning', '')
+    # 来源标注一律剥掉：正文章节里不保留【来源：…】这类引用痕迹
+    draft = strip_source_marks(draft)
 
     # 校审：单章体例 + 与其他已生成章节的一致性
     review = review_chapter(draft, _review_siblings(project_id, chapter_id))

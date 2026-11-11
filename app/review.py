@@ -75,6 +75,27 @@ def _check_source_mark(content: str) -> Dict:
     }
 
 
+# 落库前统一剥除来源标注：LLM 偶尔会自己带上，降级拼装也会带，正文一律不留
+_SRC_WRAPPED = re.compile(r"[（(]\s*(?:【|［|\[)\s*来源[\s\S]{0,200}?(?:】|］|\])\s*[）)]")
+_SRC_BARE = re.compile(r"(?:【|［|\[)\s*来源[\s\S]{0,200}?(?:】|］|\])")
+_SRC_PAREN = re.compile(r"[（(]\s*来源\s*[:：][^）)]{0,200}[）)]")
+_EMPTY_PAIR = re.compile(r"（\s*）|\(\s*\)|【\s*】|\[\s*\]")
+_SPACES = re.compile(r"[ \t]{2,}")
+
+
+def strip_source_marks(text: str) -> str:
+    """去掉正文里的【来源：…】/（来源：…）等引用标注，并清爽掉留下的空括号与多余空格。"""
+    if not text:
+        return text
+    out = _SRC_WRAPPED.sub("", text)
+    out = _SRC_BARE.sub("", out)
+    out = _SRC_PAREN.sub("", out)
+    out = _EMPTY_PAIR.sub("", out)
+    out = _SPACES.sub(" ", out)
+    return out.strip()
+
+
+
 def _check_length(content: str) -> Dict:
     n = len(_flat(content))
     ok = n >= 100
