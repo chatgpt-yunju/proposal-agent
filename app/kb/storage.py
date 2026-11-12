@@ -309,6 +309,154 @@ class FlatStore(VectorStore):
     def list_all(self) -> List[tuple]:
         return [(m['id'], self._payload(m), 0.0) for m in self._meta]
 
+    # ---------- 在线编辑：删除 / 改归属 ----------
+    def iter_rows(self, match):
+        """按谓词逐行返回 (payload, vector)。
+
+        用 memmap 逐行索引，绝不 np.asarray(整个 _V)——后者会把 621MB 一次搬进内存。
+        """
+        import numpy as np
+        if self._V is None:
+            return
+        for i, m in enumerate(self._meta):
+            if match(m):
+                yield m, np.asarray(self._V[i], dtype=np.float32)
+
+    def clone_rows(self, rows) -> int:
+        """把一批 (payload, vector) 追加进库，只重写一次 vectors.npy（open_memmap 分块拷贝）。
+
+        刻意不走 upsert/flush：flush 的实现是 np.asarray(全库) + vstack + np.save，
+        单次峰值约 1.3GB 内存 + 621MB 临时写盘；批量复制时每 200 条触发一次，
+        会把这台 7.6G 的机器直接拖进 OOM（2026-11-12 复制项目事故即源于此）。
+        这里按 2000 行分块拷贝，峰值内存约 65MB。
+        """
+        import json
+        import os
+        import numpy as np
+
+        rows = list(rows)
+        if not rows:
+            return 0
+        vp, mp, _ep, _emp = self._paths()
+        os.makedirs(self._dir, exist_ok=True)
+        dim = int(self._dim or len(rows[0][1]))
+        n_old = 0 if self._V is None else int(self._V.shape[0])
+        tmp_v = vp + '.tmp.npy'
+        out = np.lib.format.open_memmap(
+            tmp_v, mode='w+', dtype=np.float32, shape=(n_old + len(rows), dim))
+        step = 2000
+        for s in range(0, n_old, step):
+            out[s:s + step] = self._V[s:s + step]
+        for i, (_p, vec) in enumerate(rows):
+            out[n_old + i] = np.asarray(vec, dtype=np.float32)
+        out.flush()
+        del out
+        os.replace(tmp_v, vp)
+
+        with open(mp, 'a', encoding='utf-8') as f:
+            for pay, _v in rows:
+                f.write(json.dumps(pay, ensure_ascii=False) + '\n')
+        self._meta.extend(pay for pay, _v in rows)
+        self._codes = np.asarray([self._key_code(m) for m in self._meta], dtype=np.int32)
+        self._V = np.load(vp, mmap_mode='r')
+        return len(rows)
+
+    def _backup_meta(self, mp: str) -> None:
+        """备份 meta.jsonl（只含文本与归属，体积远小于向量文件），供误删后人工核对。"""
+        import os
+        import shutil
+        import time
+        if os.path.exists(mp):
+            shutil.copy2(mp, f"{mp}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+
+    def delete_docs(self, match) -> int:
+        """按谓词删除匹配的块，重写 vectors.npy + meta.jsonl，返回删除条数。
+
+        内存约束：生产库 19869 条 × 8192 维约 621 MB，而机器 available 只有 ~1.7 GB，
+        np.asarray(memmap) 或 vstack 都会把整库搬进内存导致 OOM。
+        这里用 open_memmap 建立目标文件、按 2000 行分块拷贝，峰值内存仅约 65 MB。
+        """
+        import json
+        import os
+        import numpy as np
+
+        self.flush()  # 先把内存增量落盘，避免待删记录还留在 _pending 里
+        keep = [i for i, m in enumerate(self._meta) if not match(m)]
+        removed = len(self._meta) - len(keep)
+        if removed == 0:
+            return 0
+        vp, mp, _ep, _emp = self._paths()
+        os.makedirs(self._dir, exist_ok=True)
+        self._backup_meta(mp)
+        dead_ids = {m.get('id') for m in self._meta if match(m)}
+
+        tmp_base = vp + '.tmp'
+        tmp_v = tmp_base + '.npy'
+        if self._V is None or not keep:
+            np.save(tmp_base, np.zeros((0, self._dim), np.float32))
+        else:
+            src = self._V
+            out = np.lib.format.open_memmap(
+                tmp_v, mode='w+', dtype=src.dtype, shape=(len(keep), src.shape[1]))
+            step = 2000
+            for s in range(0, len(keep), step):
+                idx = keep[s:s + step]
+                out[s:s + len(idx)] = src[idx]
+            out.flush()
+            del out
+        os.replace(tmp_v, vp)
+
+        new_meta = [self._meta[i] for i in keep]
+        tmp_m = mp + '.tmp'
+        with open(tmp_m, 'w', encoding='utf-8') as f:
+            for m in new_meta:
+                f.write(json.dumps(m, ensure_ascii=False) + '\n')
+        os.replace(tmp_m, mp)
+
+        self._extra = [(m, v) for m, v in self._extra if m.get('id') not in dead_ids]
+        self._meta = new_meta
+        self._codes = (np.asarray([self._key_code(m) for m in new_meta], dtype=np.int32)
+                       if new_meta else np.zeros((0,), np.int32))
+        self._V = np.load(vp, mmap_mode='r')
+        return removed
+
+    def reassign_docs(self, match, patch: dict) -> int:
+        """改写匹配块的作用域字段（tier / project_id / chapter_id），向量不动，只重写 meta.jsonl。
+
+        tier 迁移不需要动 vectors.npy：向量与归属无关，改归属只影响作用域过滤。
+        """
+        import json
+        import os
+        import numpy as np
+
+        self.flush()
+        hit = [m for m in self._meta if match(m)]
+        if not hit:
+            return 0
+        vp, mp, _ep, _emp = self._paths()
+        os.makedirs(self._dir, exist_ok=True)
+        self._backup_meta(mp)
+        for m in hit:
+            for k, v in patch.items():
+                if v is None:
+                    m.pop(k, None)
+                else:
+                    m[k] = v
+        tmp_m = mp + '.tmp'
+        with open(tmp_m, 'w', encoding='utf-8') as f:
+            for m in self._meta:
+                f.write(json.dumps(m, ensure_ascii=False) + '\n')
+        os.replace(tmp_m, mp)
+
+        ids = {m.get('id') for m in hit}
+        applied = {k: v for k, v in patch.items() if v is not None}
+        self._extra = [((dict(m, **applied) if m.get('id') in ids else m), v)
+                       for m, v in self._extra]
+        self._codes = (np.asarray([self._key_code(m) for m in self._meta], dtype=np.int32)
+                       if self._meta else np.zeros((0,), np.int32))
+        del vp
+        return len(hit)
+
 
 def build_store(backend: str, path: str, collection: str) -> VectorStore:
     if backend in ("flat", "npy", "file"):

@@ -17,6 +17,38 @@ class SparseIndex:
         self._corpus: List[List[str]] = []
         self._bm25: Optional[BM25Okapi] = None
 
+    def remove_ids(self, ids) -> int:
+        """按块 id 摘除条目并重建统计，返回摘除条数。
+
+        只过滤已分词好的 _corpus 再重建 BM25 统计，不重新分词全库——
+        删除一份 243 块的文档若走全量重建，jieba 分词会把接口拖到十几秒。
+        """
+        dead = set(ids or ())
+        if not dead:
+            return 0
+        kept_chunks, kept_corpus = [], []
+        for chunk, toks in zip(self._chunks, self._corpus):
+            if chunk.id in dead:
+                continue
+            kept_chunks.append(chunk)
+            kept_corpus.append(toks)
+        removed = len(self._chunks) - len(kept_chunks)
+        if removed:
+            self._chunks = kept_chunks
+            self._corpus = kept_corpus
+            self._rebuild()
+        return removed
+
+    def clear(self) -> None:
+        """清空索引。
+
+        删除或迁移文档后必须清空再重建：add() 只追加，旧条目会留在 _chunks 里，
+        导致稠密向量已删、BM25 仍能召回，出现「删了还能检索到」的幽灵命中。
+        """
+        self._chunks = []
+        self._corpus = []
+        self._bm25 = None
+
     def add(self, chunks: List[Chunk]) -> None:
         for c in chunks:
             self._chunks.append(c)

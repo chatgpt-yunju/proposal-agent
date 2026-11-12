@@ -59,19 +59,6 @@
   .step-icon { width: 20px; text-align: center; }
   .step-title { font-weight: 500; }
   .step-desc { font-size: 12px; color: #6b7280; margin-top: 2px; }
-
-  /* ---- 左栏档案 / 中栏资料导入 ---- */
-  .pill { display:inline-block; font-size:11px; border-radius:10px; padding:1px 8px; margin-right:6px; }
-  .pill.ok { background:#dcfce7; color:#15803d; }
-  .pill.warn { background:#fef3c7; color:#b45309; }
-  .pill.fail { background:#fee2e2; color:#b91c1c; }
-  .pill.info { background:#e0e7ff; color:#3730a3; }
-  .drop { border:1.5px dashed #bfdbfe; background:#f8fbff; border-radius:8px; padding:14px; text-align:center; font-size:12.5px; color:#2563eb; cursor:pointer; margin-bottom:8px; }
-  .drop.hot { background:#eff6ff; border-color:#2563eb; }
-  .docrow { display:flex; align-items:center; gap:8px; padding:6px 4px; border-bottom:1px dashed #e5e7eb; font-size:12px; }
-  .docrow .nm { flex:1 1 auto; min-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .docrow select { width:auto; margin:0; padding:2px 4px; font-size:11px; }
-  .docrow button { padding:2px 8px; font-size:11px; }
 </style>
 </head>
 <body>
@@ -93,9 +80,24 @@
     </div>
     <div id="projList"></div>
 
+    <h3 style="margin-top:16px">知识库内容</h3>
+    <button class="ghost" style="width:100%;margin-bottom:8px" onclick="loadKbList()">刷新列表</button>
+    <div id="kbList" class="muted">暂无内容</div>
+
+    <h3 style="margin-top:16px">知识库上传（三级）</h3>
+    <select id="tier" onchange="onTierChange()">
+      <option value="global">全局知识库（公司资质 / 方法论）</option>
+      <option value="project">项目知识库（RFP / 竞品 / 评审）</option>
+      <option value="chapter">章节知识库（当前章节参考）</option>
+    </select>
+    <div id="scopeSel" class="muted">上传到全局库，无需项目/章节上下文</div>
+    <div id="chapterTargetSel" style="display:none;margin-top:8px"></div>
+    <input type="file" id="files" multiple>
+    <button onclick="upload()">上传入库</button>
+    <div id="ingestMsg"></div>
   </div>
 
-  <!-- 中：章节 + 知识库 -->
+  <!-- 中：章节 -->
   <div class="col col-mid">
     <h3>章节管理</h3>
     <div id="curProj" class="muted">未选择项目</div>
@@ -119,32 +121,6 @@
       <span id="batchProgress" style="color:#2563eb;font-size:11px"></span>
     </div>
     <div id="chList"></div>
-
-    <h3 style="margin-top:16px">资料导入</h3>
-    <div class="drop" id="dropZone" onclick="document.getElementById('files').click()">
-      把文件拖到这里，或点击选择（支持多选）<br>
-      <span style="font-size:11.5px;color:#6b7280">TXT / Markdown / DOCX / 文本型 PDF；扫描 PDF 会提示需 OCR</span>
-      <input type="file" id="files" multiple style="display:none" onchange="uploadMany(this.files)">
-    </div>
-    <select id="tier" onchange="onTierChange()">
-      <option value="project">项目知识库（本项目资料，推荐）</option>
-      <option value="global">全局知识库（公司资质 / 方法论）</option>
-      <option value="chapter">章节知识库（当前章节专用）</option>
-    </select>
-    <select id="docType" onchange="onDocTypeChange()">
-      <option value="requirement">资料类型：甲方需求</option>
-      <option value="product" selected>资料类型：产品资料</option>
-      <option value="case">资料类型：历史案例</option>
-      <option value="standard">资料类型：标准规范及其他</option>
-    </select>
-    <div id="scopeSel" class="muted">上传到项目库，对整个项目所有章节生效</div>
-    <div id="chapterTargetSel" style="display:none;margin-top:8px"></div>
-    <div id="ingestMsg"></div>
-    <div id="docList" class="muted" style="margin-top:8px">暂无资料</div>
-
-    <h3 style="margin-top:16px">知识库内容</h3>
-    <button class="ghost" style="width:100%;margin-bottom:8px" onclick="loadKbList()">刷新列表</button>
-    <div id="kbList" class="muted">暂无内容</div>
   </div>
 
   <!-- 右：生成 + 结果 -->
@@ -180,21 +156,11 @@
       <button onclick="exportFull('docx')">导出 Word</button>
       <button class="ghost" onclick="exportFull('pdf')">导出 PDF</button>
       <button class="ghost" onclick="exportFull('md')">导出 Markdown</button>
+      <button class="ghost" onclick="openStylePicker()" title="把其他项目采集到的模板版式套到当前项目">套用其他项目样式</button>
     </div>
     <div id="preview" class="doc-preview">请先选择项目</div>
     <h3 style="margin-top:16px">操作记录（审计）</h3>
     <div id="recList" class="muted">请先选择项目</div>
-  </div>
-</div>
-
-<!-- 通用内容弹窗（资料预览 / 来源 / 章节正文） -->
-<div class="modal-mask" id="contentModal">
-  <div class="modal">
-    <div class="modal-header">
-      <span id="contentTitle">内容</span>
-      <button class="modal-close" onclick="closeContent()">×</button>
-    </div>
-    <div class="modal-body" id="contentBody" style="white-space:normal;background:#fff"></div>
   </div>
 </div>
 
@@ -220,6 +186,28 @@
     <div style="padding:14px 20px;border-top:1px solid #e5e7eb;display:flex;justify-content:flex-end;gap:10px;background:#fff">
       <button class="ghost" onclick="closeRisk(false)">取消</button>
       <button style="background:#dc2626" onclick="closeRisk(true)">我已知晓，继续</button>
+    </div>
+  </div>
+</div>
+
+<!-- 套用其他项目版式（只换排版，不动章节与正文） -->
+<div class="modal-mask" id="styleModal">
+  <div class="modal" style="max-width:580px">
+    <div class="modal-header">
+      <span>套用其他项目的版式</span>
+      <button class="modal-close" onclick="closeStylePicker()">×</button>
+    </div>
+    <div class="modal-body" style="white-space:normal;background:#fff">
+      <p style="margin:0 0 10px;font-size:12.5px;line-height:1.7;color:#374151">
+        版式包含各级标题的字号 / 字体 / 编号体例、正文行距与缩进、页边距、表格与图题规格。
+        <b>只替换排版，不动当前项目的章节、正文和前言摘要。</b>
+      </p>
+      <div id="styleList" class="muted" style="font-size:12.5px">加载中…</div>
+      <div id="styleMsg" style="margin-top:8px;font-size:12.5px"></div>
+    </div>
+    <div style="padding:14px 20px;border-top:1px solid #e5e7eb;display:flex;justify-content:flex-end;gap:10px;background:#fff">
+      <button class="ghost" onclick="closeStylePicker()">取消</button>
+      <button id="styleApplyBtn" onclick="applyStyle()" disabled>套用到当前项目</button>
     </div>
   </div>
 </div>
@@ -255,12 +243,94 @@ function closeRisk(ok) {
   if (r) r(!!ok);
 }
 
+// 套用其他项目版式：_stylePick 为空表示未选，'__default__' 表示恢复默认公文样式
+let _stylePick = '';
+let _styleNames = {};
+
+function closeStylePicker() { $('styleModal').style.display = 'none'; }
+
+async function openStylePicker() {
+  if (!current) { alert('请先选择项目'); return; }
+  _stylePick = '';
+  _styleNames = {};
+  $('styleMsg').textContent = '';
+  $('styleApplyBtn').disabled = true;
+  $('styleList').innerHTML = '<div class="muted">加载中…</div>';
+  $('styleModal').style.display = 'flex';
+  let list = [];
+  try {
+    list = await api('/api/styles');
+  } catch (e) {
+    $('styleList').innerHTML = `<div class="muted">读取版式清单失败：${esc(e.message)}</div>`;
+    return;
+  }
+  if (!list.length) { $('styleList').innerHTML = '<div class="muted">还没有任何项目</div>'; return; }
+  // 全部项目都列出：当前项目、未采集版式的项目置灰不可选，避免选到没有版式的来源
+  const rows = list.map(p => {
+    const self = p.id === current.id;
+    const usable = !self && p.has_style;
+    let tag = '';
+    if (self) tag = '<span class="tag c">当前项目</span>';
+    else if (!p.has_style) tag = '<span class="tag p">未采集版式</span>';
+    else if (p.archived) tag = '<span class="tag p">已归档</span>';
+    const sub = p.has_style ? p.summary : '未上传过模板，没有可套用的版式';
+    if (usable) _styleNames[p.id] = p.name;
+    return `<label style="display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:6px;${usable ? 'cursor:pointer' : 'opacity:.55;cursor:not-allowed'}">
+      <input type="radio" name="styleSrc" value="${p.id}" ${usable ? '' : 'disabled'} onchange="pickStyle(this.value)" style="margin-top:3px">
+      <span style="flex:1">
+        <span style="font-size:13px;color:#111827">${esc(p.name)} ${tag}</span>
+        <span style="display:block;font-size:11.5px;color:#6b7280;margin-top:2px">${esc(sub)}</span>
+      </span>
+    </label>`;
+  }).join('');
+  const reset = `<label style="display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px dashed #d1d5db;border-radius:8px;cursor:pointer">
+      <input type="radio" name="styleSrc" value="__default__" onchange="pickStyle(this.value)" style="margin-top:3px">
+      <span style="flex:1">
+        <span style="font-size:13px;color:#111827">恢复默认公文样式</span>
+        <span style="display:block;font-size:11.5px;color:#6b7280;margin-top:2px">清除本项目已采集的版式，回到内置体例（第N章 · 正文 16pt 仿宋_GB2312）</span>
+      </span>
+    </label>`;
+  $('styleList').innerHTML = rows + reset;
+}
+
+function pickStyle(val) {
+  _stylePick = val;
+  $('styleApplyBtn').disabled = false;
+  $('styleMsg').textContent = '';
+}
+
+async function applyStyle() {
+  if (!_stylePick || !current) return;
+  const isDefault = _stylePick === '__default__';
+  const label = isDefault ? '默认公文样式'
+    : '「' + (_styleNames[_stylePick] || _stylePick) + '」的版式';
+  if (!confirm(`将把当前项目「${current.name || ''}」的版式替换为${label}。\n\n只影响排版（标题字号/字体/编号、正文行距、页边距、表格图题），不影响章节、正文与前言摘要；原版式不会自动备份，替换后需重新套用才能找回。\n\n确定继续吗？`)) return;
+  $('styleApplyBtn').disabled = true;
+  $('styleMsg').innerHTML = '<span class="muted">正在套用…</span>';
+  try {
+    const d = await api(`/api/projects/${current.id}/style/apply`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_pid: isDefault ? '' : _stylePick })
+    });
+    $('styleMsg').innerHTML = isDefault
+      ? `<span style="color:#15803d">已恢复默认公文样式：${esc(d.summary || '')}</span>`
+      : `<span style="color:#15803d">已套用「${esc(d.from || '')}」的版式：${esc(d.summary || '')}</span>`;
+    await loadFullPreview();
+    await loadRecords();
+  } catch (e) {
+    $('styleMsg').innerHTML = `<span style="color:#dc2626">套用失败：${esc(e.message)}</span>`;
+    $('styleApplyBtn').disabled = false;
+  }
+}
+
 async function loadProjects() {
   // 在页头显示后端当前加载的前端文件版本，便于确认浏览器跑的是不是新界面
   try {
     const v = await api('/api/version');
     $('verTag').textContent = `界面版本 ${v.index_mtime}`;
   } catch (e) {}
+  // 全局默认目标字数（章节未单独设定时沿用，编辑框里要显示这个口径）
+  try { window._defChars = (await api('/health')).chapter_target_chars || 1800; } catch (e) {}
   const showArch = $('showArchived') && $('showArchived').checked;
   const list = await api('/api/projects' + (showArch ? '?include_archived=1' : ''));
   window._projMap = {};
@@ -274,6 +344,7 @@ async function loadProjects() {
     d.innerHTML = `
       <span style="flex:1">${esc(p.name)}${arch ? ' <span style="font-size:10px;color:#9ca3af;border:1px solid #e5e7eb;border-radius:3px;padding:0 3px">已归档</span>' : ''}</span>
       <button class="ghost" onclick="renameProject('${p.id}', '${esc(p.name).replace(/'/g, "\\'")}')" title="重命名" style="padding:2px 8px;font-size:11px">✏️</button>
+      <button class="ghost" onclick="duplicateProject('${p.id}')" title="复制为新项目（不带已生成正文）" style="padding:2px 8px;font-size:11px">📋</button>
       <button class="ghost" onclick="toggleArchive('${p.id}', ${arch ? 0 : 1})" title="${arch ? '取消归档' : '归档（不再显示在列表里）'}" style="padding:2px 8px;font-size:11px">${arch ? '♻️' : '🗄️'}</button>
       <button class="ghost" onclick="selectProject('${p.id}')">选择</button>
     `;
@@ -282,6 +353,17 @@ async function loadProjects() {
   if (current) {
     const fresh = list.find(p => p.id === current.id);
     if (!fresh) current = null;
+  }
+  // 首次进入未选项目时，默认打开「最旧」的一个未归档项目（created_at 最早）：
+  // 用户打开页面基本是继续在做的那份方案，而不是刚建的测试项目；避免首屏空白。
+  // 只在 current 为空时触发，selectProject 内部会再次调用 loadProjects，但那时 current 已非空，不会递归。
+  if (!current) {
+    const candidates = list.filter(p => !p.archived);
+    if (candidates.length) {
+      const oldest = candidates.reduce((a, b) =>
+        (String(a.created_at || '') <= String(b.created_at || '') ? a : b));
+      await selectProject(oldest.id);
+    }
   }
 }
 
@@ -299,6 +381,23 @@ async function toggleArchive(pid, archived) {
   }
   await loadProjects();
 }
+// 复制项目：带走章节结构/前言摘要/版式/项目与章节层知识库，不带已生成正文
+async function duplicateProject(pid) {
+  const p = (window._projMap || {})[pid] || {};
+  const name = prompt(`复制「${p.name || ''}」为新项目\n\n会带走：章节结构（编号 / 标题 / 要求 / 目标字数）、前言与摘要、模板版式、该项目的项目层与章节层知识库（全局库本就共享，不重复复制）。\n不带走：已生成的章节正文——副本需要重新生成。\n\n新项目名称：`, `${p.name || ''} - 副本`);
+  if (name === null) return;
+  const nm = (name || '').trim();
+  if (!nm) return alert('项目名称不能为空');
+  try {
+    const np = await api(`/api/projects/${pid}/duplicate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: nm })
+    });
+    await loadProjects();
+    await selectProject(np.id);
+    alert(`已创建「${np.name}」`);
+  } catch (e) { alert('复制失败：' + e.message); }
+}
 async function createProject() {
   const name = $('projName').value.trim();
   if (!name) return alert('请输入项目名称');
@@ -306,14 +405,12 @@ async function createProject() {
     body: JSON.stringify({ name, description: $('projDesc').value.trim() }) });
   $('projName').value = ''; $('projDesc').value = '';
   current = p; renderScope(); await loadProjects(); await loadChapters(); await loadStats(); await loadRecords();
-  await loadDocs();
 }
 async function selectProject(id) {
   const showArch = $('showArchived') && $('showArchived').checked;
   const list = await api('/api/projects' + (showArch ? '?include_archived=1' : ''));
   current = list.find(p => p.id === id) || null;
   renderScope(); await loadProjects(); await loadChapters(); await loadRecords();
-  if (current) await loadDocs();
   maybeResumeBatch();
 }
 
@@ -349,6 +446,8 @@ async function loadRecords() {
       chapter_create: '新增章节', chapter_delete: '删除章节',
       chapter_generate: '生成章节', batch_generate: '批量生成',
       template_import: '导入模板', kb_ingest: '知识库入库',
+      kb_delete: '删除知识库文档', kb_move: '迁移知识库层级',
+      style_apply: '套用版式',
       export: '导出文件', proposal_generate: '全量生成'
     };
     const statusColors = { success: '#15803d', failed: '#dc2626', started: '#b45309' };
@@ -379,20 +478,7 @@ async function showRecord(id) {
 async function exportFull(fmt) {
   if (!current) return alert('请先选择项目');
   try {
-    // 导出前先看未处理问题（PRD 4.6）：必须处理的项要用户明确确认才导出初稿
-    let ack = 0;
-    try {
-      const g = await api(`/api/projects/${current.id}/export_gate`);
-      if (g.blocking_count > 0) {
-        const lines = g.items.filter(x => x.status === 'fail')
-          .map(x => `· ${x.name}：${x.summary}`).join('\n');
-        if (!confirm(`导出前有 ${g.blocking_count} 项必须处理的问题：\n\n${lines}\n\n` +
-          `现在导出的是「初稿」，仍需人工审核。确定继续导出吗？`)) return;
-        ack = 1;
-      }
-    } catch (e) { /* 闸门查询失败不阻断导出，只记录 */ }
-    const r = await api(`/api/export/full_async?project_id=${current.id}&fmt=${fmt}&ack_issues=${ack}`,
-      { method: 'POST' });
+    const r = await api(`/api/export/full_async?project_id=${current.id}&fmt=${fmt}`, { method: 'POST' });
     window._exportOpId = r.op_id;
     alert(`已提交后台导出（${fmt.toUpperCase()}）。\n生成完成后可在下方「操作记录（审计）」中点击「下载」。`);
     await loadRecords();
@@ -728,8 +814,21 @@ async function loadChapters(opts) {
     // 正在生成的章节高亮，避免"操作记录在跑、列表没反应"
     const isGen = window._genChapterId === c.id;
     if (isGen) d.style.background = '#fefce8';
+
+    // 校审问题徽标：后端落库的 review_issues（JSON 数组），非空则打 ⚠️，悬停看具体问题
+    let warnBadge = '';
+    try {
+      const issues = JSON.parse(c.review_issues || '[]');
+      if (Array.isArray(issues) && issues.length) {
+        warnBadge = `<span style="display:inline-block;margin-left:6px;padding:0 5px;border-radius:8px;background:#fef3c7;color:#b45309;font-size:11px;cursor:help" title="${esc(issues.join('\n'))}">⚠️ ${issues.length}</span>`;
+      }
+    } catch (e) { /* 旧数据无该字段，忽略 */ }
     
     const isLeaf = !hasChildren[idx];
+    // 目标字数徽标：0 表示沿用全局默认，不占位；叶子章节才参与正文生成
+    const targetChars = parseInt(c.target_chars || 0, 10) || 0;
+    const charBadge = (isLeaf && targetChars)
+      ? `<span style="font-size:11px;color:#6b7280;margin-left:6px;flex:0 0 auto">${targetChars} 字</span>` : '';
     // 非叶子节点用占位符顶替复选框宽度，保证标题垂直对齐
     let checkbox = `<span style="display:inline-block;width:13px;height:13px;flex:0 0 auto"></span>`;
     let actionBtn = '';
@@ -748,9 +847,10 @@ async function loadChapters(opts) {
     }
     
     d.innerHTML = `${checkbox}
-      <span class="item-title ch-title" style="margin-left:${indent}px;font-weight:${fontWeight};font-size:${fontSize}" title="${esc(c.title)}">${level > 1 ? '└ ' : ''}${esc(c.title)}</span>
+      <span class="item-title ch-title" style="margin-left:${indent}px;font-weight:${fontWeight};font-size:${fontSize}" title="${esc(c.title)}">${level > 1 ? '└ ' : ''}${esc(c.title)}</span>${warnBadge}${charBadge}
       <span class="item-actions">
         ${actionBtn}
+        ${isLeaf ? `<button class="ghost" style="color:#7c3aed" data-cid="${c.id}" onclick="editTargetChars(this.dataset.cid)">字数</button>` : ''}
         <button class="ghost" style="color:#2563eb" data-cid="${c.id}" onclick="editChapterTitle(this.dataset.cid)">改题</button>
         <button class="ghost" style="color:#dc2626" data-cid="${c.id}" onclick="deleteChapter(this.dataset.cid)">删除</button>
       </span>`;
@@ -1108,14 +1208,8 @@ async function addChapter() {
   if (!title) return alert('请输入章节标题');
   await api(`/api/projects/${current.id}/chapters`, { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ code, title, description: $('chDesc').value.trim() }) });
-  await keepOutlineConfirmed();
   $('chCode').value=''; $('chTitle').value=''; $('chDesc').value='';
   await loadChapters();
-}
-// 章节管理里的结构动作即视为“大纲已确认”，否则生成正文会被后端门禁拦成 409
-async function keepOutlineConfirmed() {
-  if (!current) return;
-  try { await api(`/api/projects/${current.id}/outline/confirm`, { method: 'POST' }); } catch (e) {}
 }
 async function uploadTemplate() {
   if (!current) return alert('请先选择项目');
@@ -1166,7 +1260,6 @@ async function uploadTemplate() {
       msg += `\n· 页脚：居中页码`;
     }
     alert(msg);
-    await keepOutlineConfirmed();
     await loadChapters();
     await loadFullPreview();
     await loadRecords();
@@ -1176,11 +1269,32 @@ async function uploadTemplate() {
   }
   $('templateFile').value = '';
 }
+// 逐章目标字数：留空或填 0 表示沿用全局默认（CHAPTER_TARGET_CHARS），生成时区间为 90%~115%
+async function editTargetChars(cid) {
+  const c = (window._chapterMap || {})[cid];
+  if (!c) return;
+  const cur = parseInt(c.target_chars || 0, 10) || 0;
+  const defChars = (window._defChars || 1800);
+  const tip = cur ? `当前：${cur} 字` : `当前：沿用全局默认 ${defChars} 字`;
+  const v = prompt(`「${c.title}」目标正文字数\n${tip}\n\n填 0 或留空 = 沿用全局默认；实际生成范围为该值的 90%~115%。`, cur ? String(cur) : '');
+  if (v === null) return;
+  const n = Math.max(0, parseInt((v || '').trim() || '0', 10) || 0);
+  if (n && (n < 200 || n > 20000)) { alert('目标字数请填 200~20000 之间的整数，或填 0 沿用默认'); return; }
+  try {
+    await api(`/api/chapters/${cid}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_chars: n })
+    });
+    await loadChapters({ skipPreview: true });
+    await loadRecords();
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+}
 async function deleteChapter(cid) {
   if (!confirm('确定要删除这个章节吗？')) return;
   try {
     await api(`/api/chapters/${cid}`, { method: 'DELETE' });
-    await keepOutlineConfirmed();
     await loadChapters();
     await loadRecords();
   } catch (e) {
@@ -1574,16 +1688,70 @@ async function loadKbList() {
     if (!r.docs.length) { $('kbList').innerHTML = '<div class="muted">暂无内容</div>'; return; }
     const tierLabel = {global: '全局', project: '项目', chapter: '章节'};
     const tierColor = {global: 'g', project: 'p', chapter: 'c'};
-    $('kbList').innerHTML = r.docs.map(d => {
+    window._kbDocs = r.docs;
+    $('kbList').innerHTML = r.docs.map((d, i) => {
       const tag = `<span class="tag ${tierColor[d.tier] || 'g'}">${tierLabel[d.tier] || d.tier}</span>`;
       // 列表只用条数：/api/kb/list 默认不回传分块正文（全库原文 10MB 级，列表用不上）
       const chunkCount = d.chunk_count ?? d.chunks.length;
+      // 全局 ↔ 项目互转；章级知识库跟随章节，不提供迁移入口
+      let moveBtn = '';
+      if (d.tier === 'global') {
+        moveBtn = `<button class="ghost" style="padding:1px 6px;font-size:11px" onclick="moveKbDoc(${i},'project')">改为项目库</button>`;
+      } else if (d.tier === 'project') {
+        moveBtn = `<button class="ghost" style="padding:1px 6px;font-size:11px" onclick="moveKbDoc(${i},'global')">改为全局</button>`;
+      }
       return `<div class="item" style="flex-direction:column;align-items:flex-start;padding:8px 4px">
         <div>${tag} <span style="font-size:12.5px">${esc(d.source || d.doc_id)}</span></div>
-        <div class="muted" style="font-size:11px;margin-top:2px">${chunkCount} 块内容</div>
+        <div class="muted" style="font-size:11px;margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span>${chunkCount} 块内容</span>
+          <span style="flex:1"></span>
+          ${moveBtn}
+          <button class="ghost" style="padding:1px 6px;font-size:11px;color:#dc2626" onclick="deleteKbDoc(${i})">删除</button>
+        </div>
       </div>`;
     }).join('');
   } catch (e) { $('kbList').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
+// 知识库文档删除：物理删除（重写向量库），服务器保留 meta 备份
+async function deleteKbDoc(i) {
+  const d = (window._kbDocs || [])[i];
+  if (!d) return;
+  const name = d.source || d.doc_id;
+  const layer = {global: '全局', project: '项目', chapter: '章节'}[d.tier] || d.tier;
+  if (!confirm(`将从知识库删除「${name}」\n\n层级：${layer}　块数：${d.chunk_count}\n\n删除是物理删除（重写向量库文件），删除后该文档不会再被检索到，且不可在界面撤销。服务器会保留 meta.jsonl 备份供人工核对。\n\n确定删除吗？`)) return;
+  try {
+    const r = await api('/api/kb/doc/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier: d.tier, project_id: d.project_id || '', chapter_id: d.chapter_id || '', doc_id: d.doc_id })
+    });
+    await loadKbList();
+    await loadStats();
+    await loadRecords();
+    alert(`已删除 ${r.deleted_chunks} 块内容`);
+  } catch (e) { alert('删除失败：' + e.message); }
+}
+
+// 知识库文档层级迁移：全局 ↔ 项目（目标项目取当前选中项目）
+async function moveKbDoc(i, targetTier) {
+  const d = (window._kbDocs || [])[i];
+  if (!d) return;
+  const name = d.source || d.doc_id;
+  if (targetTier === 'project' && !current) { alert('请先在左侧选择一个项目，再改为项目知识库'); return; }
+  const to = targetTier === 'global' ? '全局知识库' : `项目知识库「${current.name || ''}」`;
+  if (!confirm(`将把「${name}」（${d.chunk_count} 块）从当前层迁移到${to}。\n\n只改变归属层级，内容与向量不变；迁移后该文档不再出现在原层级，只在目标层级被检索到。${d.tier === 'project' ? '\n注意：项目管理库里被别的项目借用的情况会同时失效。' : ''}\n\n确定迁移吗？`)) return;
+  try {
+    const r = await api('/api/kb/doc/move', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tier: d.tier, project_id: d.project_id || '', chapter_id: d.chapter_id || '', doc_id: d.doc_id,
+        target_tier: targetTier, target_project_id: targetTier === 'project' ? current.id : ''
+      })
+    });
+    await loadKbList();
+    await loadStats();
+    await loadRecords();
+  } catch (e) { alert('迁移失败：' + e.message); }
 }
 async function generate() {
   if (!current) return alert('请先选择项目');
@@ -1607,149 +1775,6 @@ async function generate() {
     await loadRecords();
   } catch (e) { $('genMsg').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
-// ==================== V1.1 方案工作台 ====================
-let _docs = [];
-let _uploadQueue = [];
-
-// ---------- 通用弹窗 ----------
-function showContent(title, html) {
-  $('contentTitle').textContent = title;
-  $('contentBody').innerHTML = html;
-  $('contentModal').style.display = 'flex';
-}
-function closeContent() { $('contentModal').style.display = 'none'; }
-
-// ---------- 资料导入：逐文件状态 ----------
-function onDocTypeChange() {}
-function renderDocs() {
-  const list = _uploadQueue.concat(_docs);
-  if (!list.length) { $('docList').innerHTML = '<div class="muted" style="font-size:12px">暂无资料</div>'; return; }
-  $('docList').innerHTML = list.map(d => {
-    const st = d.status_label || d.status || '上传中';
-    const cls = d.status === 'ready' ? 'ok'
-      : d.status === 'duplicate' ? 'warn'
-      : d.status === 'failed' ? 'fail' : 'info';
-    const typeSel = d.id ? `<select onchange="setDocType('${d.id}', this.value)">
-        ${[['requirement', '甲方需求'], ['product', '产品资料'], ['case', '历史案例'], ['standard', '标准规范及其他']]
-          .map(([v, l]) => `<option value="${v}"${d.doc_type === v ? ' selected' : ''}>${l}</option>`).join('')}
-      </select>` : '';
-    const acts = d.id ? (d.status !== 'duplicate' ? `<button class="ghost" onclick="previewDoc('${d.id}')">预览</button>` : '') +
-      (d.status === 'failed' ? `<button class="ghost" onclick="retryDoc('${d.id}')">重试</button>` : '')
-      : '';
-    const note = d.error ? `<div class="muted" style="font-size:11px;color:#b91c1c;margin:0 0 4px 12px">${esc(d.error)}</div>` : '';
-    return `<div class="docrow">
-      <span class="nm" title="${esc(d.filename)}">${esc(d.filename)}</span>
-      ${typeSel}
-      <span class="pill ${cls}">${esc(st)}</span>
-      <span class="muted" style="font-size:11px">${d.chunk_count ? d.chunk_count + ' 块' : ''}</span>
-      ${acts}
-    </div>${note}`;
-  }).join('');
-}
-async function loadDocs() {
-  const pid = current ? current.id : null;
-  try {
-    const r = await api('/api/kb/docs' + (pid ? `?project_id=${pid}` : ''));
-    _docs = (r.docs || []).slice();
-    if (!_docs.length && pid) {
-      // 升级前入库的资料没有登记记录，但仍在向量库里可被检索：只读列出，避免误以为“没有资料”
-      try {
-        const legacy = await api(`/api/kb/list?project_id=${pid}`);
-        _docs = (legacy.docs || []).map(d => ({
-          id: '', filename: d.source || d.doc_id || '未命名资料', tier: d.tier || '',
-          doc_type: 'legacy', status: 'ready', status_label: '升级前入库（可检索）',
-          chunk_count: (d.chunks || []).length,
-        }));
-      } catch (e) {
-        _docs = [{ id: '', filename: '历史资料读取失败：' + e.message, tier: '',
-          doc_type: 'legacy', status: 'failed', status_label: '读取失败', chunk_count: 0 }];
-      }
-    }
-    renderDocs();
-  } catch (e) {
-    $('docList').innerHTML = `<div class="err">资料列表加载失败：${esc(e.message)}</div>`;
-  }
-}
-async function uploadMany(fileList) {
-  if (!current) return alert('请先选择项目');
-  const files = Array.from(fileList || []);
-  if (!files.length) return;
-  const tier = $('tier').value;
-  const docType = $('docType').value;
-  let chapterId = '';
-  if (tier === 'chapter') {
-    const t = document.getElementById('chTarget');
-    if (!t) return alert('请先添加章节再上传到章节库');
-    chapterId = t.value;
-  }
-  for (const f of files) {
-    const tmp = { filename: f.name, status: 'parsing', status_label: '解析中', doc_type: docType };
-    _uploadQueue.push(tmp);
-    renderDocs();
-    const fd = new FormData();
-    fd.append('tier', tier);
-    fd.append('doc_type', docType);
-    fd.append('file', f);
-    if (tier !== 'global') fd.append('project_id', current.id);
-    if (tier === 'chapter') fd.append('chapter_id', chapterId);
-    try {
-      const r = await api('/api/kb/upload', { method: 'POST', body: fd });
-      if (r.status === 'failed') {
-        $('ingestMsg').innerHTML = `<div class="err">${esc(r.filename)}：${esc(r.error)}</div>`;
-      } else if (r.duplicated) {
-        $('ingestMsg').innerHTML = `<div class="flash">${esc(r.filename)}：${esc(r.error || '内容重复，已跳过')}</div>`;
-      } else {
-        $('ingestMsg').innerHTML = `<div class="flash">${esc(r.filename)} 已入库，${r.chunk_count} 个切块，可用于写作</div>`;
-      }
-      _uploadQueue = _uploadQueue.filter(q => q !== tmp);
-    } catch (e) {
-      tmp.status = 'failed'; tmp.status_label = '导入失败'; tmp.error = e.message;
-      $('ingestMsg').innerHTML = `<div class="err">${esc(f.name)}：${esc(e.message)}</div>`;
-    }
-    renderDocs();
-  }
-  $('files').value = '';
-  await loadDocs(); await loadStats();
-}
-async function retryDoc(id) {
-  try {
-    const r = await api(`/api/kb/docs/${id}/retry`, { method: 'POST' });
-    await loadDocs();
-    if (r.status === 'failed') alert('仍然失败：' + (r.error || ''));
-  } catch (e) { alert('重试失败：' + e.message); }
-}
-async function setDocType(id, val) {
-  try {
-    await api(`/api/kb/docs/${id}/type`, { method: 'PUT',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ doc_type: val }) });
-    await loadDocs();
-  } catch (e) { alert('修改类型失败：' + e.message); }
-}
-async function previewDoc(id) {
-  try {
-    const r = await api(`/api/kb/docs/${id}/preview`);
-    showContent(`资料预览 · ${r.filename}（${r.status === 'ready' ? '可用于写作' : r.status}）`,
-      r.blocks.map(b => `<div style="margin-bottom:10px">
-        <div class="muted" style="font-size:11px">${b.page ? '第 ' + b.page + ' 页' : '正文（无可靠页码）'}</div>
-        <div style="font-size:12.5px;line-height:1.75;white-space:pre-wrap">${esc(b.text)}</div>
-      </div>`).join('') +
-      `<div class="muted" style="font-size:11.5px">共 ${r.total_chars} 字${r.truncated ? '（预览已截断）' : ''}；
-        无法准确提取的表格不会展示成结构化数据。</div>`);
-  } catch (e) { alert('预览失败：' + e.message); }
-}
-// 拖拽上传
-(function bindDrop() {
-  const dz = $('dropZone');
-  if (!dz) return;
-  ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.add('hot');
-  }));
-  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
-    e.preventDefault(); dz.classList.remove('hot');
-  }));
-  dz.addEventListener('drop', e => uploadMany(e.dataTransfer.files));
-})();
-
 loadProjects();
 </script>
 </body>

@@ -1,4 +1,5 @@
 """知识库总入口：入库 + 三级检索路由（章节 > 项目 > 全局），dense+BM25 混合 + 加权融合 + 引用。"""
+import re
 from typing import List, Optional
 from uuid import uuid4
 
@@ -8,6 +9,18 @@ from .bm25 import SparseIndex
 from .chunker import chunk_file
 from .models import Chunk, Citation, Scope
 from .storage import build_store, VectorStore
+
+# 县级/市级地名（砀山县 / 黄山市 / 徽州区 / 内蒙古某旗）
+_COUNTY_RE = re.compile(r"[\u4e00-\u9fa5]{1,4}?(?:县|市|区|旗)")
+
+
+def _own_county(project_name: str) -> str:
+    """从项目名里抠出本县名（砀山县矿产资源十五五规划 → 砀山县）。"""
+    if not project_name:
+        return ""
+    m = _COUNTY_RE.search(project_name)
+    return m.group(0) if m else ""
+
 
 class KnowledgeBase:
     def __init__(self) -> None:
@@ -37,6 +50,8 @@ class KnowledgeBase:
             return
         import time
         t0 = time.time()
+        # 先清空再灌入：add() 是追加语义，重复重建会让同一块在 BM25 里出现多次
+        self.sparse.clear()
         chunks: List[Chunk] = []
         for cid, pay, _ in items:
             text = pay.get("text") or ""
@@ -166,7 +181,8 @@ class KnowledgeBase:
         return result[:top_k]
 
     def retrieve(self, query: str, project_id: Optional[str] = None,
-                 chapter_id: Optional[str] = None, top_k: Optional[int] = None) -> List[Citation]:
+                 chapter_id: Optional[str] = None, top_k: Optional[int] = None,
+                 project_name: str = "") -> List[Citation]:
         top_k = top_k or settings.retrieval_top_k
         weights = settings.scope_weights()
 
@@ -184,6 +200,19 @@ class KnowledgeBase:
                 cit.score = round(rel * weight, 6)
                 combined.append((cit, cit.score))
         combined.sort(key=lambda x: x[1], reverse=True)
+
+        # 地域软偏置：本县提权、外县降权（砀山方案不再把龙陵/桃江排进前排）
+        if project_name:
+            for cit, _ in combined:
+                blob = f"{getattr(cit, 'text', '')} {getattr(cit, 'title', '')} {getattr(cit, 'source', '')}"
+                own = _own_county(project_name)
+                if own and own in blob:
+                    cit.score = round(cit.score * 1.15, 6)
+                if own:
+                    others = {c for c in _COUNTY_RE.findall(blob) if c and c != own}
+                    if others:
+                        cit.score = round(cit.score * 0.75, 6)
+            combined.sort(key=lambda x: x[1].score, reverse=True)
 
         seen, result = set(), []
         for cit, _ in combined:
@@ -258,3 +287,134 @@ class KnowledgeBase:
         tier_order = {"global": 0, "project": 1, "chapter": 2}
         result.sort(key=lambda x: (tier_order.get(x["tier"], 9), x["source"], x["project_id"], x["chapter_id"]))
         return result
+
+    def clone_docs(self, src_pid: str, dst_pid: str, idmap: dict) -> int:
+        """把源项目的「项目层 + 章节层」知识库整批复制到新项目。
+
+        复用原向量、只重写一次向量文件、只对新块做一轮 BM25 分词：
+        这是复制项目唯一安全的做法——走 ingest_chunks 会每 200 块触发一次全库 flush，
+        621MB 库反复进内存，直接把生产机拖进 OOM。
+        """
+        fn_iter = getattr(self.store, "iter_rows", None)
+        fn_clone = getattr(self.store, "clone_rows", None)
+        if not callable(fn_iter) or not callable(fn_clone):
+            raise RuntimeError("当前向量后端不支持整批克隆（请确认 KB_VECTOR_BACKEND=flat）")
+
+        def pick(m: dict) -> bool:
+            tier = m.get("tier") or ""
+            if tier == "project":
+                return (m.get("project_id") or "") == src_pid
+            if tier == "chapter":
+                return (m.get("chapter_id") or "") in idmap
+            return False
+
+        rows = []
+        chunks: List[Chunk] = []
+        for pay, vec in fn_iter(pick):
+            text = pay.get("text") or ""
+            if not text:
+                continue
+            tier = pay.get("tier") or ""
+            if tier == "project":
+                scope = Scope("project", dst_pid)
+            else:
+                scope = Scope("chapter", dst_pid, idmap.get(pay.get("chapter_id") or ""))
+            new_id = f"{tier}-{uuid4().hex[:12]}"
+            new_pay = {
+                **scope.payload(),
+                "id": new_id,
+                "doc_id": pay.get("doc_id") or "",
+                "source": pay.get("source") or "",
+                "title": pay.get("title") or "",
+                "text": text,
+            }
+            rows.append((new_pay, vec))
+            chunks.append(Chunk(id=new_id, text=text, scope=scope,
+                                doc_id=new_pay["doc_id"], source=new_pay["source"],
+                                title=new_pay["title"]))
+        if not rows:
+            return 0
+        n = fn_clone(rows)
+        if chunks:
+            self.sparse.add(chunks)
+        return n
+
+    # ---------- 在线编辑：删除 / 全局与项目互转 ----------
+    @staticmethod
+    def _doc_matcher(tier: str, project_id: Optional[str], chapter_id: Optional[str], doc_id: str):
+        """按「层级 + 归属 + 文档」精确定位一份文档的全部块。
+
+        必须带 tier 与归属：同一份资料常常同时入了全局层和某项目层，
+        只按 doc_id 删会把两个层级的同名文档一起删掉。
+        """
+        def match(m: dict) -> bool:
+            return ((m.get("tier") or "") == (tier or "")
+                    and (m.get("project_id") or "") == (project_id or "")
+                    and (m.get("chapter_id") or "") == (chapter_id or "")
+                    and (m.get("doc_id") or "") == (doc_id or ""))
+        return match
+
+    def _ids_of(self, match) -> List[str]:
+        try:
+            return [str(cid) for cid, pay, _ in self.store.list_all() if match(pay)]
+        except Exception:
+            return []
+
+    def delete_doc(self, tier: str, project_id: Optional[str], chapter_id: Optional[str],
+                   doc_id: str) -> int:
+        """物理删除一份文档的全部块，返回删除条数。
+
+        向量库重写后 BM25 必须同步摘除，否则会出现「稠密已删、稀疏仍能召回」的幽灵结果。
+        """
+        fn = getattr(self.store, "delete_docs", None)
+        if not callable(fn):
+            raise RuntimeError("当前向量后端不支持在线删除（请确认 KB_VECTOR_BACKEND=flat）")
+        match = self._doc_matcher(tier, project_id, chapter_id, doc_id)
+        ids = self._ids_of(match)
+        n = fn(match)
+        if ids:
+            self.sparse.remove_ids(ids)
+        return n
+
+    def move_doc(self, tier: str, project_id: Optional[str], chapter_id: Optional[str], doc_id: str,
+                 target_tier: str, target_project_id: Optional[str] = None) -> int:
+        """在全局库与项目知识库之间迁移一份文档，返回迁移条数。
+
+        向量不变、只改归属；迁移后该文档的章级绑定一律清空（跨层迁移还带着 chapter_id
+        会指向别的章节，检索时既命不中也容易误命中本层其它内容）。
+        """
+        fn = getattr(self.store, "reassign_docs", None)
+        if not callable(fn):
+            raise RuntimeError("当前向量后端不支持在线迁移（请确认 KB_VECTOR_BACKEND=flat）")
+        if target_tier == "project":
+            if not target_project_id:
+                raise ValueError("迁移到项目知识库必须指定目标项目")
+            patch = {"tier": "project", "project_id": target_project_id, "chapter_id": ""}
+        elif target_tier == "global":
+            patch = {"tier": "global", "project_id": "", "chapter_id": ""}
+        else:
+            raise ValueError("只支持在「全局知识库」与「项目知识库」之间互转")
+        match = self._doc_matcher(tier, project_id, chapter_id, doc_id)
+        ids = self._ids_of(match)
+        n = fn(match, patch)
+        if ids:
+            # BM25 里存的是 Chunk 快照，含旧的 scope；必须摘掉后按新归属重新灌入
+            self.sparse.remove_ids(ids)
+            fresh: List[Chunk] = []
+            for cid, pay, _ in self.store.list_all():
+                if str(cid) in set(ids):
+                    text = pay.get("text") or ""
+                    if not text:
+                        continue
+                    fresh.append(Chunk(
+                        id=str(cid), text=text,
+                        scope=Scope(tier=pay.get("tier") or "global",
+                                    project_id=pay.get("project_id") or None,
+                                    chapter_id=pay.get("chapter_id") or None),
+                        doc_id=pay.get("doc_id") or "",
+                        source=pay.get("source") or "",
+                        title=pay.get("title") or "",
+                    ))
+            if fresh:
+                self.sparse.add(fresh)
+        return n

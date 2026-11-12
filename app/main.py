@@ -31,18 +31,58 @@ logger = logging.getLogger(__name__)
 # 降级兜底文本的特征串：出现即说明本次不是真实模型产出，不能写库覆盖已有正文
 _DEGRADED_MARK = "本章模型响应超时"
 
+# 正文里不该出现的引用标注（成对括号块）：模型偶发把【来源：xxx.docx，global级】塞回正文，
+# prompt 与校审循环是"劝"，落库点统一剥除是"闸"——到 max_iterations 顶格也不能漏进最终稿。
+# 注意：必须按顺序分步 sub，不能用一个大交替——否则外层（…）会在嵌套小括号处抢先截断，
+# 留下半拉【】残片。先剥【…】/［…］整块，再剥（…）/(…)，最后清空括号。
+_SRC_BLOCKS = [
+    re.compile(r"【[^】]*】"),
+    re.compile(r"［[^］]*］"),
+    re.compile(r"（[^）]*）"),
+    re.compile(r"\([^)]*\)"),
+]
+# 残留的不成对来源句（如"来源：xxx。"独立成句）
+_SRC_LINE_RE = re.compile(r"[ \t]*来源\s*[:：][^\n。；]*[。；]?", )
+# 正文里不该出现的 markdown 标题行（标题由系统统一拼 ## {code} {title}，模型不该再吐 #）
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+.*$", re.MULTILINE)
+# 剥完来源块后留下的空括号 / 空引用碎片
+_EMPTY_PAREN_RE = re.compile(r"[（(]\s*[)）]")
+
+
+def _strip_source_blocks(t: str) -> str:
+    for pat in _SRC_BLOCKS:
+        t = pat.sub(lambda m: "" if "来源" in m.group(0) else m.group(0), t)
+    return t
+
+
+def _sanitize_draft(text: str) -> str:
+    """落库前统一清洗章节正文：剥来源标注块/句、剥独立 markdown 标题行、压缩多余空行。"""
+    if not text:
+        return ""
+    t = text
+    # 反复剥，直到没有新增（嵌套括号可能一轮剥不干净，最多 3 轮足够）
+    for _ in range(3):
+        new = _strip_source_blocks(t)
+        new = _SRC_LINE_RE.sub("", new)
+        new = _MD_HEADING_RE.sub("", new)
+        new = _EMPTY_PAREN_RE.sub("", new)
+        if new == t:
+            break
+        t = new
+    # 压缩 3 个以上连续换行为 2 个，去掉行尾空格
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
 from . import db
 from .config import settings
-from .kb.chunker import chunk_file
-from .kb.models import Scope
+from .kb.models import Chunk, Scope
 from .kb.router import KnowledgeBase
-from .llm.chat import build_chat
+from .llm.chat import build_chat, _target_chars
 from .workflow import ProposalWorkflow
 from .export import export_proposal, md_to_docx, md_to_pdf
-from .template_style import DEFAULT_STYLE, extract_from_docx, number_chapters
-from .review import review_chapter, strip_source_marks
-from .brief import build_outline, brief_prompt_payload, llm_brief, rule_brief
-from .checks import run_checks
+from .template_style import DEFAULT_STYLE, extract_from_docx, number_chapters, summarize_style
+from .review import review_chapter
 from .schemas import (
     ChapterCreate,
     ChapterGenOut,
@@ -173,6 +213,71 @@ def rename_project(pid: str, body: ProjectCreate):
     return proj
 
 
+def _copy_project_kb(src_pid: str, dst_pid: str, idmap: dict) -> int:
+    """把源项目的「项目层 + 章节层」知识库复制到新项目，返回复制块数。
+
+    只复制这两层：全局库本来就是所有项目共享，再存一份会与检索权重打架。
+    章节层按 idmap 重映射到新章节，否则副本里的章节资料会指向原项目的章节 id，永远检索不到。
+    走 kb.clone_docs（复用原向量 + 单次重写向量文件）；绝不能用 ingest_chunks——
+    那条路每 200 块 flush 一次全库，621MB 反复进内存会让生产机 OOM。
+    """
+    return kb.clone_docs(src_pid, dst_pid, idmap)
+
+
+@app.post("/api/projects/{pid}/duplicate", response_model=ProjectOut)
+def duplicate_project(pid: str, body: dict = None):
+    """复制项目：章节结构、前言摘要、模板版式与项目/章节层知识库。
+
+    不复制已生成的章节正文——副本用来在既有骨架上重新生成内容，带旧正文会让人误以为
+    「已经生成过」而跳过重写。前言/摘要是独立区块，按原样带过去。
+    """
+    src = db.get_project(pid)
+    if not src:
+        raise HTTPException(404, "项目不存在")
+    body = body or {}
+    name = (body.get("name") or "").strip() or f"{src.get('name') or '项目'} - 副本"
+    name = name[:80]
+    existing = {p.get("name") for p in db.list_projects(include_archived=True)}
+    if name in existing:
+        base, i = name, 2
+        while f"{base}（{i}）" in existing:
+            i += 1
+        name = f"{base}（{i}）"
+
+    newp = db.create_project(name, src.get("description") or "")
+    npid = newp["id"]
+
+    # 版式与前言摘要：与章节内容无关，原样搬
+    if (src.get("style_json") or "").strip():
+        db.update_project(npid, style_json=src["style_json"])
+    if (src.get("front_matter") or "").strip():
+        try:
+            fm = json.loads(src["front_matter"])
+        except ValueError:
+            fm = {}
+        if isinstance(fm, dict):
+            db.update_project_front_matter(npid, preface=fm.get("preface") or "",
+                                           abstract=fm.get("abstract") or "")
+
+    chapters = db.list_chapters(pid)
+    idmap = {}
+    for c in chapters:
+        nc = db.create_chapter(npid, c.get("code") or "", c.get("title") or "",
+                               c.get("description") or "", level=int(c.get("level") or 1),
+                               target_chars=int(c.get("target_chars") or 0))
+        idmap[c["id"]] = nc["id"]
+
+    kb_chunks = 0
+    try:
+        kb_chunks = _copy_project_kb(pid, npid, idmap)
+    except Exception:
+        logger.warning("复制项目知识库失败，项目结构与版式已建好", exc_info=True)
+
+    audit(npid, "project_duplicate", name,
+          detail=f"从「{src.get('name') or ''}」复制 {len(chapters)} 章（不含正文）、知识库 {kb_chunks} 块")
+    return db.get_project(npid)
+
+
 # ---------- 章节 ----------
 @app.post("/api/projects/{pid}/chapters", response_model=ChapterOut)
 def create_chapter(pid: str, body: ChapterCreate):
@@ -215,25 +320,56 @@ def rename_chapter(cid: str, body: ChapterRename):
         fields["code"] = body.code.strip()
     if body.description is not None:
         fields["description"] = body.description.strip()
+    if body.target_chars is not None:
+        try:
+            fields["target_chars"] = max(0, int(body.target_chars))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "目标字数必须是整数（0 表示沿用全局默认）")
     if not fields:
         return ch
     updated = db.update_chapter_fields(cid, **fields)
     if not updated:
         raise HTTPException(404, "章节不存在")
+    detail = "改标题：" + (ch.get("title") or "") + " → " + fields.get("title", ch.get("title") or "")
+    if "target_chars" in fields:
+        detail += f"；目标字数 {int(ch.get('target_chars') or 0)} → {fields['target_chars']}"
     audit(ch.get("project_id"), "chapter_rename", fields.get("title", ch.get("title", "")),
-          detail="改标题：" + (ch.get("title") or "") + " → " + fields.get("title", ch.get("title") or ""),
-          chapter_id=cid)
+          detail=detail, chapter_id=cid)
     return updated
 
 
 # ---------- 模板上传：自动解析章节结构 ----------
+def _extract_word_target(text: str) -> int:
+    """从标题/描述/正文里提取显式字数声明，如「（约 2000 字）」「3000 字左右」「不少于 1500 字」。
+
+    只认「数字 + 字」，不会把「第1章」「2026年」误判成字数；范围闸门 200~20000，
+    低于 200 多半是「本节约 100 字说明」这类噪声，高于 20000 基本是页码或金额串联。
+    """
+    if not text:
+        return 0
+    m = re.search(r"(\d{3,6})\s*(?:个)?字", text)
+    if not m:
+        return 0
+    try:
+        n = int(m.group(1))
+    except ValueError:
+        return 0
+    return n if 200 <= n <= 20000 else 0
+
+
 def _parse_template_chunks(text: str) -> list:
-    """从模板文本中解析章节列表，支持六级标题层级。
+    """从模板文本中解析章节列表，支持六级标题层级，并顺带估算每章目标字数。
 
     约定：Markdown 的 # ~ ###### 分别对应第 1~6 级标题（上传 docx 时按 Heading 1~6 转换而来）。
+
+    字数口径（先声明、后统计）：
+      1. 标题或该章正文里出现「约 2000 字」这类声明 → 直接采用；
+      2. 没有声明时，统计该章标题下模板正文的总字数，≥300 才采信（模板只有标题则为 0，
+         由前端沿用全局默认 CHAPTER_TARGET_CHARS）。
     """
     import re
     chapters = []
+    cur = None
     for raw in text.split("\n"):
         line = raw.strip()
         if not line:
@@ -245,8 +381,18 @@ def _parse_template_chunks(text: str) -> list:
             if not title:
                 continue
             code = str(len(chapters) + 1).zfill(2)
-            chapters.append({"code": code, "title": title, "description": "", "level": level})
+            cur = {"code": code, "title": title, "description": "", "level": level,
+                   "target_chars": _extract_word_target(title), "_body_chars": 0}
+            chapters.append(cur)
             continue
+        if cur is not None:
+            cur["_body_chars"] += len(re.sub(r"\s", "", line))
+            if not cur["target_chars"]:
+                cur["target_chars"] = _extract_word_target(line)
+    for ch in chapters:
+        body = ch.pop("_body_chars", 0) or 0
+        if not ch["target_chars"] and body >= 300:
+            ch["target_chars"] = body
     return chapters
 
 
@@ -377,11 +523,16 @@ def upload_template(pid: str, file: UploadFile = File(...)):
     updated = []
     for ch in chapters:
         if ch["title"] in existing_map:
-            # 已存在则更新层级
-            db.update_chapter_level(existing_map[ch["title"]]["id"], ch.get("level", 1))
+            # 已存在则更新层级；目标字数只在「原值为 0（未人工设置）」时用模板解析值覆盖，
+            # 否则会把用户逐章调好的字数冲掉
+            old = existing_map[ch["title"]]
+            db.update_chapter_level(old["id"], ch.get("level", 1))
+            if ch.get("target_chars") and not int(old.get("target_chars") or 0):
+                db.update_chapter_fields(old["id"], target_chars=int(ch["target_chars"]))
             updated.append(ch["title"])
             continue
-        db.create_chapter(pid, ch["code"], ch["title"], ch["description"], level=ch.get("level", 1))
+        db.create_chapter(pid, ch["code"], ch["title"], ch["description"], level=ch.get("level", 1),
+                          target_chars=ch.get("target_chars", 0))
         created.append(ch)
 
     # 保存模板样式定义（标题各级字体字号/加粗/对齐 + 编号格式 + 正文字体）
@@ -475,12 +626,76 @@ def kb_list(project_id: Optional[str] = None, with_text: bool = False):
     return {"docs": docs, "total": len(docs)}
 
 
+@app.post("/api/kb/doc/delete")
+def kb_delete_doc(body: dict):
+    """删除知识库中的一份文档（物理删除，向量文件重写，BM25 同步摘除）。
+
+    定位键必须带 tier + project_id + chapter_id + doc_id：同一份资料常常既在全局层、
+    又在某项目层各入一次，只按 doc_id 删会误删另一层。
+    """
+    tier = (body or {}).get("tier") or ""
+    doc_id = (body or {}).get("doc_id") or ""
+    if not tier or not doc_id:
+        raise HTTPException(400, "缺少 tier 或 doc_id")
+    pid = (body or {}).get("project_id") or None
+    chid = (body or {}).get("chapter_id") or None
+    try:
+        n = kb.delete_doc(tier, pid, chid, doc_id)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    if n == 0:
+        raise HTTPException(404, "未找到匹配的文档块（可能已被删除）")
+    audit(pid or "", "kb_delete", doc_id,
+          detail=f"删除 {tier} 层文档 {doc_id}，共 {n} 块")
+    return {"ok": True, "deleted_chunks": n}
+
+
+@app.post("/api/kb/doc/move")
+def kb_move_doc(body: dict):
+    """在「全局知识库」与「项目知识库」之间迁移一份文档。
+
+    target_tier=project 时归到 target_project_id（前端传当前选中项目）；
+    target_tier=global 时清空项目归属。章级绑定一律清空。
+    """
+    tier = (body or {}).get("tier") or ""
+    doc_id = (body or {}).get("doc_id") or ""
+    target_tier = (body or {}).get("target_tier") or ""
+    if not tier or not doc_id or not target_tier:
+        raise HTTPException(400, "缺少 tier / doc_id / target_tier")
+    if tier == target_tier:
+        raise HTTPException(400, "目标层级与当前层级相同")
+    if {tier, target_tier} - {"global", "project"}:
+        raise HTTPException(400, "只支持在全局知识库与项目知识库之间互转；章级知识库不参与迁移")
+    pid = (body or {}).get("project_id") or None
+    chid = (body or {}).get("chapter_id") or None
+    target_pid = (body or {}).get("target_project_id") or None
+    if target_tier == "project":
+        if not target_pid:
+            raise HTTPException(400, "迁移到项目知识库需要指定目标项目")
+        if not db.get_project(target_pid):
+            raise HTTPException(404, "目标项目不存在")
+    try:
+        n = kb.move_doc(tier, pid, chid, doc_id, target_tier, target_pid)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if n == 0:
+        raise HTTPException(404, "未找到匹配的文档块（可能已被迁移或删除）")
+    where = "全局知识库" if target_tier == "global" else f"项目「{(db.get_project(target_pid) or {}).get('name', '')}」"
+    audit(target_pid or pid or "", "kb_move", doc_id,
+          detail=f"{tier} 层文档 {doc_id} 迁移至{where}，共 {n} 块")
+    return {"ok": True, "moved_chunks": n, "target_tier": target_tier}
+
+
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "embedding_provider": settings.embedding_provider,
         "vector_backend": settings.kb_vector_backend,
+        # 章节未单独设定目标字数时沿用的全局默认值，供前端在编辑框里显示口径
+        "chapter_target_chars": _target_chars(),
     }
 
 
@@ -502,8 +717,6 @@ def generate_proposal(body: WorkflowGenerateRequest):
     proj = db.get_project(body.project_id)
     if not proj:
         raise HTTPException(404, "项目不存在")
-    if not db.get_outline_confirmed(body.project_id):
-        raise HTTPException(409, "请先在大纲阶段确认章节结构，再生成正文")
     chapters = db.list_chapters(body.project_id)
     if not chapters:
         raise HTTPException(400, "请先为项目创建章节")
@@ -546,7 +759,7 @@ def generate_proposal(body: WorkflowGenerateRequest):
 
 
 @app.post("/api/workflow/generate_chapter_stream")
-async def generate_chapter_stream(project_id: str, chapter_id: str, instruction: str = ""):
+async def generate_chapter_stream(project_id: str, chapter_id: str):
     """流式生成章节，SSE 输出，逐字返回内容。"""
     from fastapi.responses import StreamingResponse
     import json
@@ -555,22 +768,16 @@ async def generate_chapter_stream(project_id: str, chapter_id: str, instruction:
     proj = db.get_project(project_id)
     if not proj:
         raise HTTPException(404, "项目不存在")
-    if not db.get_outline_confirmed(project_id):
-        raise HTTPException(409, "请先在大纲阶段确认章节结构，再生成正文")
     chapters = db.list_chapters(project_id)
     target = next((c for c in chapters if c["id"] == chapter_id), None)
     if not target:
         raise HTTPException(404, "章节不存在")
 
     chat = build_chat()
-    ctx = brief_prompt_payload(db.get_project_profile(project_id), db.get_project_brief(project_id))
     chapter_spec = {
         "id": target["id"], "code": target["code"], "title": target["title"],
         "description": target["description"], "sort": target["sort"],
     }
-    # 重写前留档：只覆盖目标章节，原稿可一键恢复
-    db.save_chapter_prev_content(chapter_id, target.get("content") or "")
-    db.set_chapter_gen_status(chapter_id, "generating")
 
     async def event_stream():
         full_content = ""
@@ -582,7 +789,7 @@ async def generate_chapter_stream(project_id: str, chapter_id: str, instruction:
         # 检索知识库（同步操作，放在后面执行）
         query = f"{target['title']} {target.get('description', '')}".strip()
         cites = kb.retrieve(query, project_id=project_id, chapter_id=chapter_id,
-                            top_k=settings.retrieval_top_k)
+                            top_k=settings.retrieval_top_k, project_name=proj["name"])
         from dataclasses import asdict
         cite_dicts = [asdict(c) for c in cites]
 
@@ -594,26 +801,21 @@ async def generate_chapter_stream(project_id: str, chapter_id: str, instruction:
         # 发送第三步：开始流式生成
         yield f"data: {json.dumps({'type': 'step', 'step': 2, 'status': 'running', 'msg': '正在调用 LLM 流式生成...'})}\n\n"
 
-        # 流式生成内容（带项目统一口径 + 本次重写要求）
-        try:
-            async for content_delta, reasoning_delta in chat.generate_chapter_stream(
-                chapter=chapter_spec, project_name=proj["name"], citations=cite_dicts,
-                project_context=ctx, instruction=instruction,
-            ):
-                full_content += content_delta
-                full_reasoning += reasoning_delta
-                yield f"data: {json.dumps({'type': 'content', 'delta': content_delta, 'reasoning_delta': reasoning_delta})}\n\n"
-        except Exception as e:
-            logger.error(f"章节流式生成失败 chapter={chapter_id}: {e}", exc_info=True)
-            db.set_chapter_gen_status(chapter_id, "failed", str(e)[:300])
-            audit(project_id, "chapter_generate", target["title"], "failed",
-                  detail=f"流式生成失败：{str(e)[:300]}", chapter_id=chapter_id)
-            yield f"data: {json.dumps({'type': 'error', 'message': '生成失败：' + str(e)[:200]}, ensure_ascii=False)}\n\n"
-            return
+        # 流式生成内容
+        async for content_delta, reasoning_delta in chat.generate_chapter_stream(
+            chapter=chapter_spec, project_name=proj["name"], citations=cite_dicts
+        ):
+            full_content += content_delta
+            full_reasoning += reasoning_delta
+            yield f"data: {json.dumps({'type': 'content', 'delta': content_delta, 'reasoning_delta': reasoning_delta})}\n\n"
+
+        # 落库前统一清洗：剥来源标注块/句、剥 markdown 标题行（在 review 之前做，
+        # 这样校审跑的是真正要写库的文本，来源标注不会因为清洗后消失而误报"通过"）
+        body = _sanitize_draft(full_content)
 
         # 校审：单章体例 + 与其他已生成章节的一致性（重复、数字口径）
         siblings = _review_siblings(project_id, chapter_id)
-        review = review_chapter(full_content, siblings)
+        review = review_chapter(body, siblings)
 
         # 发送第四步：审查完成，开始汇编
         msg = ("审查通过，格式与口径一致" if review["passed"]
@@ -626,8 +828,7 @@ async def generate_chapter_stream(project_id: str, chapter_id: str, instruction:
         paths = _proposal_paths(proj["name"])
         ch_title = target["title"]
         ch_code = target["code"]
-        # LLM 只生成纯正文，我们自己拼接标题；来源标注一律剥掉，正文不留引用
-        body = strip_source_marks(full_content.strip())
+        # LLM 只生成纯正文，我们自己拼接标题
         # 降级兜底文本（模型超时拼装的检索要点）不落库，避免把已生成的正文冲成碎片
         if _DEGRADED_MARK in body:
             yield f"data: {json.dumps({'type': 'error', 'msg': '模型响应超时，本章原正文未改动，请重试'}, ensure_ascii=False)}\n\n"
@@ -661,10 +862,12 @@ async def generate_chapter_stream(project_id: str, chapter_id: str, instruction:
                 os.replace(tmp_md, paths["md"])
                 # 不再逐章导出 Word/PDF：整份导出走数据库 + 模版样式，逐章导出既慢又是另一套样式
                 db.update_chapter_content(chapter_id, body)
-                # 来源落库：正文不留引用标记，依据在「查看来源」里逐条可查
-                db.set_chapter_sources(chapter_id, cite_dicts)
-                db.set_chapter_gen_status(chapter_id, "generated")
-                logger.info(f"章节生成完成: chapter={chapter_id}, 字数={len(full_content)}, 引用数={len(cite_dicts)}")
+                # 把校审问题持久化到章节行，刷新页面后 ⚠️ 徽标不丢
+                try:
+                    db.update_chapter_review(chapter_id, json.dumps(review["issues"], ensure_ascii=False))
+                except Exception:
+                    logger.warning("写入校审问题失败", exc_info=True)
+                logger.info(f"章节生成完成: chapter={chapter_id}, 字数={len(body)}, 引用数={len(cite_dicts)}")
             except Exception as e:
                 logger.error(f"章节生成写入失败: {str(e)}", exc_info=True)
                 if os.path.exists(tmp_md):
@@ -681,13 +884,11 @@ async def generate_chapter_stream(project_id: str, chapter_id: str, instruction:
 
 
 @app.post("/api/workflow/generate_chapter")
-def generate_single_chapter(project_id: str, chapter_id: str, instruction: str = ""):
+def generate_single_chapter(project_id: str, chapter_id: str):
     """单独生成/重新生成指定章节，不影响其他章节。"""
     proj = db.get_project(project_id)
     if not proj:
         raise HTTPException(404, "项目不存在")
-    if not db.get_outline_confirmed(project_id):
-        raise HTTPException(409, "请先在大纲阶段确认章节结构，再生成正文")
     chapters = db.list_chapters(project_id)
     target = next((c for c in chapters if c["id"] == chapter_id), None)
     if not target:
@@ -696,36 +897,27 @@ def generate_single_chapter(project_id: str, chapter_id: str, instruction: str =
     # 检索知识库 + 生成章节
     query = f"{target['title']} {target.get('description', '')}".strip()
     cites = kb.retrieve(query, project_id=project_id, chapter_id=chapter_id,
-                        top_k=settings.retrieval_top_k)
+                        top_k=settings.retrieval_top_k, project_name=proj["name"])
     from dataclasses import asdict
     cite_dicts = [asdict(c) for c in cites]
 
     chat = build_chat()
-    ctx = brief_prompt_payload(db.get_project_profile(project_id), db.get_project_brief(project_id))
     chapter_spec = {
         "id": target["id"], "code": target["code"], "title": target["title"],
         "description": target["description"], "sort": target["sort"],
     }
-    # 重写前留档，失败也不丢原稿
-    db.save_chapter_prev_content(chapter_id, target.get("content") or "")
-    db.set_chapter_gen_status(chapter_id, "generating")
     audit(project_id, "chapter_generate", target["title"], "started",
           detail="开始生成", chapter_id=chapter_id)
     t_start = time.time()
     try:
-        draft = chat.generate_chapter(chapter=chapter_spec, project_name=proj["name"],
-                                      citations=cite_dicts, project_context=ctx,
-                                      instruction=instruction)
+        draft = chat.generate_chapter(chapter=chapter_spec, project_name=proj["name"], citations=cite_dicts)
     except Exception as e:
-        db.set_chapter_gen_status(chapter_id, "failed", str(e)[:300])
         audit(project_id, "chapter_generate", target["title"], "failed",
               detail=f"生成失败：{str(e)[:300]}", chapter_id=chapter_id)
         logger.error(f"章节生成失败: chapter={chapter_id}, {str(e)}", exc_info=True)
         # 把真实原因带回前端，避免批量生成时只能看到 "HTTP 500"
         raise HTTPException(500, f"生成失败：{str(e)[:200]}")
     reasoning = getattr(chat, '_last_reasoning', '')
-    # 来源标注一律剥掉：正文章节里不保留【来源：…】这类引用痕迹
-    draft = strip_source_marks(draft)
 
     # 降级兜底文本不许覆盖已有正文：模型超时/连续失败时 generate_chapter 会返回
     # 「> 说明：本章模型响应超时…」的拼装内容，若照常写库会把原本成文的章节冲成碎片。
@@ -733,6 +925,9 @@ def generate_single_chapter(project_id: str, chapter_id: str, instruction: str =
         audit(project_id, "chapter_generate", target["title"], "failed",
               detail="模型响应超时触发降级兜底，已保留原正文未覆盖", chapter_id=chapter_id)
         raise HTTPException(502, "模型响应超时（本章原正文已保留，未被覆盖），请稍后重试")
+
+    # 落库前统一清洗（与流式端点同口径）：剥来源标注、markdown 标题行
+    draft = _sanitize_draft(draft)
 
     # 校审：单章体例 + 与其他已生成章节的一致性
     review = review_chapter(draft, _review_siblings(project_id, chapter_id))
@@ -770,9 +965,12 @@ def generate_single_chapter(project_id: str, chapter_id: str, instruction: str =
 
         # 必须写回章节表：章节列表、全文预览、导出都读 chapters.content，
         # 只更新 md 会出现"操作记录在生成、章节管理没变化"的假成功
-        db.update_chapter_content(chapter_id, draft.strip())
-        db.set_chapter_sources(chapter_id, cite_dicts)
-        db.set_chapter_gen_status(chapter_id, "generated")
+        db.update_chapter_content(chapter_id, draft)
+        # 校审问题持久化到章节行（前端 ⚠️ 徽标）
+        try:
+            db.update_chapter_review(chapter_id, json.dumps(review["issues"], ensure_ascii=False))
+        except Exception:
+            logger.warning("写入校审问题失败", exc_info=True)
     logger.info(f"章节生成完成: chapter={chapter_id}, 字数={len(draft)}, 引用数={len(cite_dicts)}")
 
     elapsed = int(time.time() - t_start)
@@ -847,6 +1045,75 @@ def full_preview(pid: str):
         "style": style,
         "style_source": "template" if (proj.get("style_json") or "").strip() else "default",
     }
+
+
+@app.get("/api/styles")
+def list_style_sources():
+    """版式来源清单：供「套用其他项目样式」选择器使用。
+
+    与 /api/projects 的区别：这里必须包含已归档项目（历史体例往往只留在归档项目里），
+    并给出是否采集过模板样式与一句话版式摘要，避免用户凭项目名猜体例。
+    """
+    out = []
+    for p in db.list_projects(include_archived=True):
+        raw = (p.get("style_json") or "").strip()
+        style = None
+        if raw:
+            try:
+                style = json.loads(raw)
+            except ValueError:
+                style = None
+        has_style = isinstance(style, dict) and bool(style.get("levels"))
+        out.append({
+            "id": p["id"],
+            "name": p.get("name") or "",
+            "archived": bool(p.get("archived")),
+            "has_style": has_style,
+            "summary": summarize_style(style) if has_style else "",
+        })
+    return out
+
+
+@app.post("/api/projects/{pid}/style/apply")
+def apply_project_style(pid: str, body: dict):
+    """套用其他项目已采集的模板版式，或恢复默认公文样式。
+
+    source_pid 为空字符串 ⇒ 恢复默认（清空 style_json）。
+    只搬 style_json（字号/字体/编号/行距/页边距/表格图题），不碰章节、正文与前言摘要。
+    """
+    proj = db.get_project(pid)
+    if not proj:
+        raise HTTPException(404, "项目不存在")
+    source_pid = ((body or {}).get("source_pid") or "").strip()
+
+    if not source_pid:
+        db.update_project(pid, style_json="")
+        audit(pid, "style_apply", proj.get("name", ""), detail="版式恢复为默认公文样式")
+        return {"ok": True, "style_source": "default",
+                "summary": summarize_style(DEFAULT_STYLE), "from": ""}
+
+    if source_pid == pid:
+        raise HTTPException(400, "不能套用当前项目自身的版式")
+    src = db.get_project(source_pid)
+    if not src:
+        raise HTTPException(404, "来源项目不存在")
+    raw = (src.get("style_json") or "").strip()
+    if not raw:
+        raise HTTPException(400, f"来源项目「{src.get('name', '')}」尚未采集模板版式，无法套用")
+    try:
+        style = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, f"来源项目「{src.get('name', '')}」的版式数据已损坏，无法套用")
+    if not isinstance(style, dict) or not style.get("levels"):
+        raise HTTPException(400, f"来源项目「{src.get('name', '')}」的版式缺少层级定义，无法套用")
+
+    # 原样复制 JSON 文本，不做二次序列化，避免浮点/键序被改写
+    db.update_project(pid, style_json=raw)
+    summary = summarize_style(style)
+    audit(pid, "style_apply", src.get("name", ""),
+          detail=f"套用「{src.get('name', '')}」的版式：{summary}")
+    return {"ok": True, "style_source": "template", "summary": summary,
+            "from": src.get("name", ""), "source_pid": source_pid}
 
 
 @app.get("/api/export/{pid}/{fmt}")
@@ -1170,7 +1437,7 @@ def _draft_front_matter_core(pid: str, on_chunk=None) -> dict:
 
     try:
         chat = build_chat()
-        raw = chat.complete_stream(system=system, user=user, max_tokens=8192, temperature=0.3,
+        raw = chat.complete_stream(system=system, user=user, max_tokens=81920, temperature=0.3,
                                    on_chunk=on_chunk)
     except Exception as e:
         raise RuntimeError(f"自动起草失败：{str(e)[:200]}")
@@ -1223,33 +1490,8 @@ def _with_front_matter(md_text: str, front: dict) -> str:
     return "\n".join(blocks) + "\n" + md_text
 
 
-def _export_appendix(pid: str, chapters: List[dict]) -> str:
-    """Markdown 导出附带的「资料来源 + 待确认事项」，供审核人员核查（PRD 4.6）。"""
-    lines = ["", "## 资料来源", ""]
-    any_src = False
-    for c in chapters:
-        srcs = db.get_chapter_sources(c["id"])
-        if not srcs:
-            continue
-        any_src = True
-        lines.append(f"### {c.get('code','')} {c['title']}")
-        for s in srcs[:8]:
-            fn = re.sub(r"[:：]?第\s*\d+\s*页", "", s.get("source") or "")
-            page = s.get("page") if s.get("page") is not None else _page_of(s.get("source") or "")
-            loc = f"，第 {page} 页" if page else ""
-            body = (s.get("text") or "").replace("\n", " ")
-            lines.append(f"- 《{fn}》{loc}：{body[:90]}…")
-        lines.append("")
-    if not any_src:
-        lines.append("（暂无章节级资料来源记录）")
-    lines += ["", "## 待确认事项", ""]
-    pend = db.get_project_brief(pid).get("pending") or []
-    lines += [f"- {p}" for p in pend] if pend else ["- 无"]
-    return "\n".join(lines)
-
-
 @app.get("/api/export/full/{pid}/{fmt}")
-def export_full_proposal(pid: str, fmt: str, ack_issues: bool = False):
+def export_full_proposal(pid: str, fmt: str):
     """导出整份方案（按数据库章节层级拼接，含已生成与未生成章节）。"""
     if fmt not in ("md", "docx", "pdf"):
         raise HTTPException(422, "fmt 需为 md / docx / pdf")
@@ -1259,24 +1501,11 @@ def export_full_proposal(pid: str, fmt: str, ack_issues: bool = False):
     chapters = db.list_chapters(pid)
     if not chapters:
         raise HTTPException(400, "该项目暂无章节，无法导出")
-    # 导出闸门：有必须处理的问题时，要求用户先确认再导出初稿
-    if not ack_issues:
-        checks = run_checks(proj, db.get_project_profile(pid), db.get_project_brief(pid),
-                            _chapters_with_sources(pid), db.list_kb_docs(pid))
-        if checks["blocking_count"] > 0:
-            raise HTTPException(
-                409,
-                f"存在 {checks['blocking_count']} 项必须处理的问题（共 {checks['issue_count']} 条提示），"
-                "确认按初稿导出后请带上 ack_issues=1",
-            )
 
     style = db.get_project_style(pid)
     # 前言/摘要只在用户点「自动起草」时生成；导出只取已保存的内容，不做任何自动起草
     front = db.get_project_front_matter(pid)
     md_text = _chapters_to_markdown(proj["name"], chapters, style)
-    if fmt == "md":
-        # 只有 Markdown 是 P0 的"带依据初稿"，Word/PDF 正式排版属 P1
-        md_text += _export_appendix(pid, chapters)
     import tempfile
     tmp_dir = tempfile.mkdtemp()
     base = f"{proj['name']}_技术方案".replace("/", "_").replace("\\", "_")
@@ -1353,8 +1582,7 @@ def _run_full_export(op_id: str, pid: str, fmt: str) -> None:
 
 
 @app.post("/api/export/full_async")
-def export_full_async(background_tasks: BackgroundTasks, project_id: str, fmt: str,
-                      ack_issues: bool = False):
+def export_full_async(background_tasks: BackgroundTasks, project_id: str, fmt: str):
     """提交整份方案的后台导出任务，立即返回审计记录 id。"""
     if fmt not in ("md", "docx", "pdf"):
         raise HTTPException(422, "fmt 需为 md / docx / pdf")
@@ -1364,15 +1592,6 @@ def export_full_async(background_tasks: BackgroundTasks, project_id: str, fmt: s
     chapters = db.list_chapters(project_id)
     if not chapters:
         raise HTTPException(400, "该项目暂无章节，无法导出")
-    if not ack_issues:
-        checks = run_checks(proj, db.get_project_profile(project_id),
-                            db.get_project_brief(project_id),
-                            _chapters_with_sources(project_id), db.list_kb_docs(project_id))
-        if checks["blocking_count"] > 0:
-            raise HTTPException(
-                409,
-                f"存在 {checks['blocking_count']} 项必须处理的问题，确认按初稿导出请带 ack_issues=1",
-            )
 
     op = db.add_operation(
         project_id, "export", f"{proj['name']} 整份方案", "started",
@@ -1451,522 +1670,7 @@ def export_chapter_file(chapter_id: str, fmt: str):
     return FileResponse(path, filename=os.path.basename(path), media_type=media)
 
 
-# ============================================================
-# V1.1 升级：项目需求档案 / 需求整理 / 便捷导入 / 来源 / 检查 / 编辑导出
-# ============================================================
-# PRD 对应：4.1 项目与需求档案、4.2 知识库便捷导入、4.3 需求确认与大纲、
-# 4.5 来源展示与质量检查、4.6 编辑与导出。
-
-DOC_TYPES = {
-    "requirement": "甲方需求",
-    "product": "产品资料",
-    "case": "历史案例",
-    "standard": "标准规范及其他",
-}
-
-
-def _require_project(pid: str) -> dict:
-    proj = db.get_project(pid)
-    if not proj:
-        raise HTTPException(404, "项目不存在")
-    return proj
-
-
-# ---------- 4.1 项目需求档案 ----------
-@app.get("/api/projects/{pid}/profile")
-def get_profile(pid: str):
-    _require_project(pid)
-    return db.get_project_profile(pid)
-
-
-@app.put("/api/projects/{pid}/profile")
-def save_profile(pid: str, body: dict):
-    """保存项目需求档案。名称/建设目标必填，缺失时明确拒绝，不静默存成空。"""
-    _require_project(pid)
-    goal = str(body.get("goal") or "").strip()
-    if "goal" in body and not goal:
-        raise HTTPException(422, "建设目标不能为空：方案全篇都以它为基准")
-    saved = db.update_project_profile(pid, body)
-    audit(pid, "profile_save", "项目需求档案", detail="更新需求档案")
-    return saved
-
-
-# ---------- 4.3 需求整理（需求确认） ----------
-@app.get("/api/projects/{pid}/brief")
-def get_brief(pid: str):
-    _require_project(pid)
-    return db.get_project_brief(pid)
-
-
-@app.put("/api/projects/{pid}/brief")
-def save_brief(pid: str, body: dict):
-    """用户编辑后保存需求整理结果；刷新页面按这份恢复。"""
-    _require_project(pid)
-    saved = db.update_project_brief(pid, body)
-    audit(pid, "brief_save", "需求整理", detail=f"已知事实 {len(saved['facts'])} 条，"
-                                              f"待确认 {len(saved['pending'])} 项")
-    return saved
-
-
-def _doc_materials(docs) -> str:
-    """把已可用资料的摘要拼成需求整理的输入素材，不再触发额外检索。"""
-    parts = []
-    for d in docs:
-        if d.get("status") != "ready":
-            continue
-        parts.append(f"《{d.get('filename','')}》（{DOC_TYPES.get(d.get('doc_type'), '其他')}）"
-                     f"：{(d.get('summary') or '')[:600]}")
-    return "\n\n".join(parts)
-
-
-@app.post("/api/projects/{pid}/brief/refresh")
-def refresh_brief(pid: str):
-    """整理需求：区分已知事实 / 建设要求 / 方案建议 / 待确认事项。"""
-    proj = _require_project(pid)
-    profile = db.get_project_profile(pid)
-    if not (profile.get("goal") or "").strip():
-        raise HTTPException(400, "请先填写建设目标：没有目标无法判断哪些要求需要响应")
-
-    docs = db.list_kb_docs(pid)
-    chat = build_chat()
-    try:
-        brief = llm_brief(profile, proj["name"], docs, _doc_materials(docs), chat)
-        source = "llm"
-    except Exception as e:
-        logger.warning(f"需求整理调用模型失败，退化为规则整理: {e}")
-        brief = rule_brief(profile, proj["name"], docs)
-        source = "rule"
-    brief["source"] = source
-    saved = db.update_project_brief(pid, brief)
-    audit(pid, "brief_refresh", "需求整理",
-          detail=f"来源 {source}，已知事实 {len(saved['facts'])} 条，要求 {len(saved['requirements'])} 条，"
-                 f"待确认 {len(saved['pending'])} 项")
-    return saved
-
-
-# ---------- 4.3 大纲生成与确认 ----------
-@app.get("/api/projects/{pid}/outline")
-def get_outline(pid: str):
-    _require_project(pid)
-    chapters = db.list_chapters(pid)
-    return {
-        "confirmed": db.get_outline_confirmed(pid),
-        "chapters": [{
-            "id": c["id"], "code": c.get("code") or "", "title": c["title"],
-            "description": c.get("description") or "", "level": c.get("level") or 1,
-            "generated": bool((c.get("content") or "").strip()),
-            "gen_status": c.get("gen_status") or ("generated" if (c.get("content") or "").strip() else "pending"),
-        } for c in chapters],
-    }
-
-
-@app.post("/api/projects/{pid}/outline/generate")
-def generate_outline(pid: str, replace: bool = False):
-    """依据需求档案生成默认八章大纲；已有正文时不允许整份覆盖。"""
-    proj = _require_project(pid)
-    profile = db.get_project_profile(pid)
-    brief = db.get_project_brief(pid)
-    if not (profile.get("goal") or "").strip():
-        raise HTTPException(400, "请先填写建设目标，再生成大纲")
-    outline = build_outline(profile, brief)
-
-    existing = db.list_chapters(pid)
-    if existing:
-        if not replace:
-            return {"exists": True, "created": 0, "proposed": outline,
-                    "message": "项目已有章节，未做改动；如需整份替换请显式选择覆盖"}
-        if any((c.get("content") or "").strip() for c in existing):
-            raise HTTPException(409, "项目已有生成正文的章节，禁止整份覆盖大纲；请逐章调整后再试")
-
-    for c in existing:
-        db.delete_chapter(c["id"])
-    for ch in outline:
-        db.create_chapter(pid, ch["code"], ch["title"], ch["description"], level=ch.get("level", 1))
-    db.set_outline_confirmed(pid, False)
-    audit(pid, "outline_generate", "大纲", detail=f"生成 {len(outline)} 章大纲，待人工确认")
-    return {"exists": bool(existing), "created": len(outline), "proposed": outline,
-            "message": "大纲已生成，请调整并确认后再生成正文"}
-
-
-@app.post("/api/projects/{pid}/outline/confirm")
-def confirm_outline(pid: str):
-    """确认大纲：之后的章节生成按这份结构走。"""
-    _require_project(pid)
-    if not db.list_chapters(pid):
-        raise HTTPException(400, "还没有章节可确认")
-    db.set_outline_confirmed(pid, True)
-    audit(pid, "outline_confirm", "大纲", detail="大纲已确认，可生成正文")
-    return {"confirmed": True}
-
-
-@app.put("/api/projects/{pid}/outline")
-def save_outline(pid: str, body: dict):
-    """批量保存大纲编辑结果（编号/标题/本章要解决的问题）。"""
-    _require_project(pid)
-    items = body.get("chapters") or []
-    if not isinstance(items, list):
-        raise HTTPException(422, "chapters 需为数组")
-    allowed_ids = {c["id"] for c in db.list_chapters(pid)}
-    updated = 0
-    for it in items:
-        cid = str(it.get("id") or "")
-        if cid not in allowed_ids:
-            # 前端传进来的 id 必须真实存在于该项目，否则忽略（不越权改别的项目章节）
-            continue
-        db.update_chapter_fields(
-            cid,
-            code=str(it.get("code") or ""),
-            title=str(it.get("title") or "").strip() or "未命名章节",
-            description=str(it.get("description") or ""),
-        )
-        updated += 1
-    # 大纲结构一改，之前的"已确认"就失效，必须重新确认再生成
-    db.set_outline_confirmed(pid, False)
-    audit(pid, "outline_save", "大纲", detail=f"保存 {updated} 个章节，需重新确认大纲")
-    return {"updated": updated, "confirmed": False}
-
-
-@app.post("/api/chapters/{cid}/move")
-def move_chapter(cid: str, direction: str = "up"):
-    """上移/下移章节：与相邻同级章节交换排序号。"""
-    ch = db.get_chapter(cid)
-    if not ch:
-        raise HTTPException(404, "章节不存在")
-    if direction not in ("up", "down"):
-        raise HTTPException(422, "direction 需为 up / down")
-    chapters = db.list_chapters(ch["project_id"])
-    idx = next((i for i, c in enumerate(chapters) if c["id"] == cid), None)
-    step = -1 if direction == "up" else 1
-    target_idx = idx + step
-    while 0 <= target_idx < len(chapters) and chapters[target_idx].get("sort") == ch.get("sort"):
-        target_idx += step
-    if not (0 <= target_idx < len(chapters)):
-        return {"moved": False, "reason": "已在边界"}
-    other = chapters[target_idx]
-    # 只交换两个章节的 sort，其余不动
-    import sqlite3 as _sqlite3
-    with db._lock:
-        c = db._conn()
-        c.execute("UPDATE chapters SET sort=? WHERE id=?", (other.get("sort"), cid))
-        c.execute("UPDATE chapters SET sort=? WHERE id=?", (ch.get("sort"), other["id"]))
-        c.commit()
-        c.close()
-    db.set_outline_confirmed(ch["project_id"], False)
-    return {"moved": True}
-
-
-# ---------- 4.2 便捷导入：逐文件状态 ----------
-def _upload_dir() -> str:
-    d = os.path.join(os.path.dirname(settings.resolved_vector_dir), "uploads")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _store_copy(doc_id: str, filename: str, content: bytes) -> str:
-    ext = os.path.splitext(filename)[1].lower()
-    path = os.path.join(_upload_dir(), f"{doc_id}{ext}")
-    with open(path, "wb") as fh:
-        fh.write(content)
-    return path
-
-
-def _digest(content: bytes) -> str:
-    import hashlib
-    return hashlib.sha256(content).hexdigest()
-
-
-def _ingest_registered_doc(doc: dict) -> dict:
-    """按登记的落盘文件跑解析 + 入库，并把状态回写到 kb_docs。"""
-    doc_id = doc["id"]
-    tier = doc["tier"]
-    scope = Scope(tier=tier, project_id=doc.get("project_id") or None,
-                  chapter_id=doc.get("chapter_id") or None)
-    try:
-        chunks = chunk_file(doc["path"], scope, doc_id, source_label=doc["filename"])
-        if not chunks:
-            raise ValueError("未解析出可用文本（可能是空文档或纯图片）")
-        n = kb.ingest_chunks(chunks)
-        text_all = "".join(c.text for c in chunks)
-        return db.update_kb_doc(doc_id, status="ready", chunk_count=n,
-                                chars=len(text_all), summary=text_all[:800], error="")
-    except Exception as e:
-        logger.warning(f"资料解析失败 doc={doc_id}: {e}")
-        return db.update_kb_doc(doc_id, status="failed", error=str(e)[:300], chunk_count=0)
-
-
-@app.post("/api/kb/upload")
-def kb_upload(
-    tier: str = Form("project"),
-    project_id: Optional[str] = Form(None),
-    chapter_id: Optional[str] = Form(None),
-    doc_type: str = Form("other"),
-    file: UploadFile = File(...),
-):
-    """单文件上传（前端按文件逐个调用，保证每个文件都有独立状态）。"""
-    if doc_type not in DOC_TYPES:
-        doc_type = "other"
-    scope = Scope(tier=tier, project_id=project_id, chapter_id=chapter_id)
-    try:
-        scope.validate()
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    if tier in ("project", "chapter"):
-        _require_project(project_id or "")
-    if tier == "chapter":
-        if not any(c["id"] == chapter_id for c in db.list_chapters(project_id)):
-            raise HTTPException(404, "章节不存在或不属于该项目")
-
-    filename = os.path.basename(file.filename or "未命名文件")
-    content = file.file.read()
-    if not content:
-        raise HTTPException(422, "文件内容为空")
-
-    fp = _digest(content)
-    dup = db.find_kb_doc_by_fingerprint(fp, tier, project_id or "", chapter_id or "")
-    if dup:
-        doc = db.add_kb_doc("d_" + uuid.uuid4().hex[:12], tier, filename,
-                            project_id=project_id or "", chapter_id=chapter_id or "",
-                            doc_type=doc_type, fingerprint=fp, status="duplicate")
-        db.update_kb_doc(doc["id"], error=f"与已存在资料《{dup['filename']}》内容相同，已跳过")
-        return {**_doc_out(doc), "duplicated": True}
-
-    doc_id = "d_" + uuid.uuid4().hex[:12]
-    path = _store_copy(doc_id, filename, content)
-    doc = db.add_kb_doc(doc_id, tier, filename, project_id=project_id or "",
-                        chapter_id=chapter_id or "", doc_type=doc_type,
-                        fingerprint=fp, path=path, status="parsing")
-    doc = _ingest_registered_doc(doc)
-    audit(project_id, "kb_ingest", filename,
-          detail=f"{DOC_TYPES.get(doc_type, '其他')}，状态 {doc['status']}，"
-                 f"{doc.get('chunk_count') or 0} 个切块"
-                 + (f"，失败原因：{doc['error']}" if doc["status"] == "failed" else ""))
-    return {**_doc_out(doc), "duplicated": False}
-
-
-def _doc_out(doc: dict) -> dict:
-    return {
-        "id": doc["id"],
-        "filename": doc.get("filename") or "",
-        "tier": doc.get("tier") or "",
-        "doc_type": doc.get("doc_type") or "other",
-        "doc_type_label": DOC_TYPES.get(doc.get("doc_type") or "other", "其他"),
-        "status": doc.get("status") or "",
-        "status_label": {
-            "parsing": "解析中", "ready": "可用于写作", "failed": "导入失败",
-            "duplicate": "已存在", "waiting": "等待上传",
-        }.get(doc.get("status") or "", doc.get("status") or ""),
-        "chunk_count": doc.get("chunk_count") or 0,
-        "chars": doc.get("chars") or 0,
-        "summary": (doc.get("summary") or "")[:200],
-        "error": doc.get("error") or "",
-        "created_at": doc.get("created_at") or "",
-    }
-
-
-@app.get("/api/kb/docs")
-def kb_docs(project_id: Optional[str] = None):
-    docs = db.list_kb_docs(project_id)
-    return {"docs": [_doc_out(d) for d in docs], "total": len(docs)}
-
-
-@app.put("/api/kb/docs/{doc_id}/type")
-def kb_doc_type(doc_id: str, body: dict):
-    doc = db.get_kb_doc(doc_id)
-    if not doc:
-        raise HTTPException(404, "资料不存在")
-    new_type = str(body.get("doc_type") or "")
-    if new_type not in DOC_TYPES:
-        raise HTTPException(422, "资料类型需为 " + " / ".join(DOC_TYPES))
-    db.update_kb_doc(doc_id, doc_type=new_type)
-    return _doc_out(db.get_kb_doc(doc_id))
-
-
-@app.post("/api/kb/docs/{doc_id}/retry")
-def kb_doc_retry(doc_id: str):
-    """单文件重试：只重跑这一个文件，不影响其他资料。"""
-    doc = db.get_kb_doc(doc_id)
-    if not doc:
-        raise HTTPException(404, "资料不存在")
-    if not doc.get("path") or not os.path.exists(doc["path"]):
-        db.update_kb_doc(doc_id, status="failed", error="原始文件已丢失，请重新上传")
-        raise HTTPException(400, "原始文件已丢失，请重新上传")
-    db.update_kb_doc(doc_id, status="parsing", error="")
-    doc = _ingest_registered_doc(db.get_kb_doc(doc_id))
-    return _doc_out(doc)
-
-
-@app.get("/api/kb/docs/{doc_id}/preview")
-def kb_doc_preview(doc_id: str, max_chars: int = 4000):
-    """解析正文预览：PDF 带页码，其他格式只给文件名与正文，不编造定位信息。"""
-    doc = db.get_kb_doc(doc_id)
-    if not doc:
-        raise HTTPException(404, "资料不存在")
-    path = doc.get("path") or ""
-    if not path or not os.path.exists(path):
-        raise HTTPException(400, "原始文件已丢失，无法预览")
-    ext = os.path.splitext(path)[1].lower()
-    blocks = []
-    if ext == ".pdf":
-        try:
-            import pymupdf
-            with pymupdf.open(path) as pdf:
-                for i, page in enumerate(pdf, 1):
-                    text = (page.get_text("text") or "").strip()
-                    if text:
-                        blocks.append({"page": i, "text": text})
-        except Exception as e:
-            raise HTTPException(400, f"PDF 预览失败：{str(e)[:120]}")
-    elif ext == ".docx":
-        try:
-            from docx import Document
-            d = Document(path)
-            text = "\n".join(p.text for p in d.paragraphs if p.text.strip())
-            blocks.append({"page": None, "text": text})
-        except Exception as e:
-            raise HTTPException(400, f"DOCX 预览失败：{str(e)[:120]}")
-    else:
-        try:
-            blocks.append({"page": None, "text": open(path, encoding="utf-8", errors="ignore").read()})
-        except OSError as e:
-            raise HTTPException(400, f"读取失败：{str(e)[:120]}")
-
-    total = sum(len(b["text"]) for b in blocks)
-    if total <= 0:
-        raise HTTPException(400, "未提取到任何文本：可能是扫描件，需要 OCR 或更换文本版")
-    used, out = 0, []
-    for b in blocks:
-        if used >= max_chars:
-            break
-        take = b["text"][: max_chars - used]
-        out.append({"page": b["page"], "text": take})
-        used += len(take)
-    return {
-        "id": doc["id"], "filename": doc.get("filename"), "status": doc.get("status"),
-        "has_page": any(b["page"] for b in out), "total_chars": total,
-        "blocks": out, "truncated": used < total,
-    }
-
-
-# ---------- 4.5 来源展示 ----------
-def _page_of(source: str) -> Optional[int]:
-    m = re.search(r"第\s*(\d+)\s*页", source or "")
-    return int(m.group(1)) if m else None
-
-
-@app.get("/api/chapters/{cid}/sources")
-def chapter_sources(cid: str):
-    ch = db.get_chapter(cid)
-    if not ch:
-        raise HTTPException(404, "章节不存在")
-    rows = db.get_chapter_sources(cid)
-    return {
-        "chapter": ch["title"],
-        "sources": [{
-            "doc_id": r.get("doc_id") or "",
-            "source": r.get("source") or "",
-            "filename": re.sub(r"[:：]?第\s*\d+\s*页", "", r.get("source") or ""),
-            "page": r.get("page") if r.get("page") is not None else _page_of(r.get("source") or ""),
-            "title": r.get("title") or "",
-            "text": r.get("text") or "",
-        } for r in rows],
-        "count": len(rows),
-        "note": ("无页码时只展示文件名与摘录" if any(not r.get("page") for r in rows) else ""),
-    }
-
-
-# ---------- 4.5 质量检查 ----------
-def _chapters_with_sources(pid: str) -> List[dict]:
-    chapters = db.list_chapters(pid)
-    for c in chapters:
-        c["sources"] = db.get_chapter_sources(c["id"])
-    return chapters
-
-
-@app.get("/api/projects/{pid}/checks")
-def project_checks(pid: str):
-    proj = _require_project(pid)
-    profile = db.get_project_profile(pid)
-    brief = db.get_project_brief(pid)
-    docs = db.list_kb_docs(pid)
-    return run_checks(proj, profile, brief, _chapters_with_sources(pid), docs)
-
-
-# ---------- 4.6 正文保存 / 单章恢复 ----------
-def _write_chapter_to_md(proj_name: str, code: str, title: str, body: str) -> str:
-    """章节正文变化后同步方案 md 文件，保证预览、导出与页面一致。"""
-    paths = _proposal_paths(proj_name)
-    new_chapter = f"## {code} {title}\n\n{body}"
-    pattern = re.compile(r"^##\s+" + re.escape(code or "") + r"\s+.*?(?=^##\s|\Z)",
-                         re.MULTILINE | re.DOTALL)
-    with _MD_LOCK:
-        old_md = ""
-        if os.path.exists(paths["md"]):
-            with open(paths["md"], encoding="utf-8") as f:
-                old_md = f.read()
-        else:
-            old_md = f"# {proj_name} 技术方案\n"
-        new_md = pattern.sub(new_chapter, old_md, count=1) if code and pattern.search(old_md) \
-            else old_md.rstrip() + "\n\n" + new_chapter + "\n"
-        tmp = paths["md"] + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(new_md)
-        os.replace(tmp, paths["md"])
-    return new_md
-
-
-@app.put("/api/chapters/{cid}/content")
-def save_chapter_content(cid: str, body: dict):
-    """保存人工编辑后的正文；保存即生效于预览与导出。"""
-    ch = db.get_chapter(cid)
-    if not ch:
-        raise HTTPException(404, "章节不存在")
-    content = str(body.get("content") or "")
-    db.update_chapter_content(cid, content)
-    db.set_chapter_gen_status(cid, "edited")
-    proj = db.get_project(ch["project_id"]) or {"name": "方案"}
-    _write_chapter_to_md(proj["name"], ch.get("code") or "", ch["title"], content.strip())
-    audit(ch["project_id"], "chapter_edit", ch["title"],
-          detail=f"人工编辑并保存，{len(content)} 字", chapter_id=cid)
-    return {"chapter_id": cid, "chars": len(content), "saved": True}
-
-
-@app.post("/api/chapters/{cid}/restore")
-def restore_chapter(cid: str):
-    """恢复到重写前的原稿（原稿为空则说明没被重写过）。"""
-    ch = db.get_chapter(cid)
-    if not ch:
-        raise HTTPException(404, "章节不存在")
-    prev = db.get_chapter_prev_content(cid)
-    if not (prev or "").strip():
-        raise HTTPException(400, "没有可恢复的原稿")
-    cur = ch.get("content") or ""
-    db.save_chapter_prev_content(cid, cur)
-    db.update_chapter_content(cid, prev)
-    db.set_chapter_gen_status(cid, "edited")
-    proj = db.get_project(ch["project_id"]) or {"name": "方案"}
-    _write_chapter_to_md(proj["name"], ch.get("code") or "", ch["title"], prev.strip())
-    audit(ch["project_id"], "chapter_restore", ch["title"],
-          detail=f"恢复重写前原稿，{len(prev)} 字", chapter_id=cid)
-    return {"chapter_id": cid, "content": prev, "chars": len(prev)}
-
-
-# ---------- 导出闸门：带未处理问题先确认 ----------
-@app.get("/api/projects/{pid}/export_gate")
-def export_gate(pid: str):
-    proj = _require_project(pid)
-    checks = project_checks(pid)
-    return {
-        "blocking_count": checks["blocking_count"],
-        "issue_count": checks["issue_count"],
-        "pending": db.get_project_brief(pid).get("pending") or [],
-        "items": [{"name": x["name"], "status": x["status"], "summary": x["summary"]}
-                  for x in checks["items"]],
-        "project": proj["name"],
-    }
-
-
 # ---------- M5：静态前端 ----------
-
 _static_dir = Path(__file__).resolve().parent / "static"
 if _static_dir.is_dir():
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")

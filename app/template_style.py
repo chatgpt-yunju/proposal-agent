@@ -655,6 +655,46 @@ def extract_from_docx(path: str) -> Dict:
     }
 
 
+def _num_text(v) -> str:
+    """把采集到的字号/行距压成人类写法：16.0 → 16，14.5 → 14.5。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return str(int(f)) if f == int(f) else f"{f:g}"
+
+
+def summarize_style(style: Dict) -> str:
+    """一句话概括版式特征，供「套用其他项目样式」选择器展示。
+
+    只描述能一眼分辨的差异：一级标题编号体例、一级标题字号字体、正文字号字体与行距。
+    取不到的部分自动省略，绝不臆造。
+    """
+    if not isinstance(style, dict) or not style.get("levels"):
+        return "默认公文体例 · 正文 16pt 仿宋_GB2312"
+    lv = (style.get("levels") or [{}])[0] or {}
+    tpl = str(lv.get("lvlText") or "").strip()
+    for i in range(1, 10):
+        tpl = tpl.replace(f"%{i}", "N")
+    parts: List[str] = []
+    if tpl:
+        parts.append(tpl)
+    if lv.get("size"):
+        head = f"一级 {_num_text(lv['size'])}pt"
+        if lv.get("font"):
+            head += f" {lv['font']}"
+        parts.append(head)
+    body = style.get("body") or {}
+    if body.get("size"):
+        txt = f"正文 {_num_text(body['size'])}pt"
+        if body.get("font"):
+            txt += f" {body['font']}"
+        if body.get("lineSpacing"):
+            txt += f" / {_num_text(body['lineSpacing'])} 倍行距"
+        parts.append(txt)
+    return " · ".join(parts) if parts else "已采集，但缺少可识别的字号信息"
+
+
 def level_spec(style: Dict, level: int) -> Dict:
     """取某一级的样式定义；越界时回退到最后一个已知级别或默认。"""
     levels = style.get("levels") or DEFAULT_STYLE["levels"]

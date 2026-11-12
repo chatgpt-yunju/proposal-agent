@@ -15,7 +15,6 @@ class ProjectOut(BaseModel):
     description: str
     created_at: str
     archived: int = 0
-    outline_confirmed: int = 0
 
 
 class ChapterCreate(BaseModel):
@@ -25,10 +24,11 @@ class ChapterCreate(BaseModel):
 
 
 class ChapterRename(BaseModel):
-    """改章节标题/编号：只传要改的字段，未传的保持原值。"""
+    """改章节标题/编号/目标字数：只传要改的字段，未传的保持原值。"""
     title: Optional[str] = None
     code: Optional[str] = None
     description: Optional[str] = None
+    target_chars: Optional[int] = None
 
 
 class FrontMatterIn(BaseModel):
@@ -45,11 +45,8 @@ class ChapterOut(BaseModel):
     description: str
     sort: int
     level: int = 1
+    target_chars: int = 0
     content: str = ""
-    # 生成状态与重写前原稿：前端据此显示"生成中/失败/可恢复"
-    gen_status: str = ""
-    gen_error: str = ""
-    prev_content: str = ""
 
 
 class CitationOut(BaseModel):
