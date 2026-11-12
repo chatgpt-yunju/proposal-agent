@@ -15,6 +15,7 @@ class ProjectOut(BaseModel):
     description: str
     created_at: str
     archived: int = 0
+    outline_confirmed: int = 0
 
 
 class ChapterCreate(BaseModel):
@@ -45,6 +46,10 @@ class ChapterOut(BaseModel):
     sort: int
     level: int = 1
     content: str = ""
+    # 生成状态与重写前原稿：前端据此显示"生成中/失败/可恢复"
+    gen_status: str = ""
+    gen_error: str = ""
+    prev_content: str = ""
 
 
 class CitationOut(BaseModel):

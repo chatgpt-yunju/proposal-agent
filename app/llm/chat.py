@@ -29,6 +29,8 @@ class ChatProvider(Protocol):
         project_name: str,
         citations: List[Dict],
         issues: Optional[List[str]] = None,
+        project_context: Optional[str] = None,
+        instruction: Optional[str] = None,
     ) -> str:
         ...
 
@@ -65,7 +67,9 @@ class ApiChat:
         return "\n".join(lines)
 
     def generate_chapter(self, *, chapter: Dict, project_name: str,
-                         citations: List[Dict], issues: Optional[List[str]] = None) -> str:
+                         citations: List[Dict], issues: Optional[List[str]] = None,
+                         project_context: Optional[str] = None,
+                         instruction: Optional[str] = None) -> str:
         self._last_fallback = False
         if not citations:
             # 只返回纯正文：标题由调用方统一拼接，避免出现双重标题
@@ -80,6 +84,14 @@ class ApiChat:
         extra = ""
         if issues:
             extra = "\n针对以下审查问题补足与修正：\n" + "\n".join(f"- {x}" for x in issues)
+
+        proj_ctx = ""
+        if project_context:
+            proj_ctx = ("\n项目上下文（全篇统一使用，凡与本上下文冲突的写法一律不写）：\n"
+                        f"{project_context}\n")
+        ins = ""
+        if instruction:
+            ins = f"\n本次重写要求（必须逐条落实）：{instruction}\n"
 
         target = _target_chars()
         lo, hi = int(target * 0.9), int(target * 1.15)
@@ -107,7 +119,7 @@ class ApiChat:
             f"项目：{project_name}\n"
             f"待撰写章节：{chapter.get('title','')}\n"
             f"章节要求：{chapter.get('description') or '（依据项目资料自行组织）'}\n"
-            f"{extra}\n"
+            f"{extra}{proj_ctx}{ins}\n"
             f"参考资料（直接引用其中的事实和数据，不要标注来源）：\n{context}\n"
             f"请直接输出该章节的正文内容，不要带任何标题，仿照政府实施方案的公文风格，"
             f"正文控制在 {lo}~{hi} 字之间。"
@@ -254,7 +266,9 @@ class ApiChat:
         raise RuntimeError(f"模型调用失败：{last_err}")
 
     async def generate_chapter_stream(self, *, chapter: Dict, project_name: str,
-                                      citations: List[Dict], issues: Optional[List[str]] = None):
+                                      citations: List[Dict], issues: Optional[List[str]] = None,
+                                      project_context: Optional[str] = None,
+                                      instruction: Optional[str] = None):
         """流式生成章节，逐块 yield 返回 (delta_text, reasoning_delta)。"""
         if not citations:
             # 只返回纯正文：标题由调用方统一拼接，避免出现双重标题
@@ -270,6 +284,14 @@ class ApiChat:
         extra = ""
         if issues:
             extra = "\n针对以下审查问题补足与修正：\n" + "\n".join(f"- {x}" for x in issues)
+
+        proj_ctx = ""
+        if project_context:
+            proj_ctx = ("\n项目上下文（全篇统一使用，凡与本上下文冲突的写法一律不写）：\n"
+                        f"{project_context}\n")
+        ins = ""
+        if instruction:
+            ins = f"\n本次重写要求（必须逐条落实）：{instruction}\n"
 
         target = _target_chars()
         lo, hi = int(target * 0.9), int(target * 1.15)
@@ -297,7 +319,7 @@ class ApiChat:
             f"项目：{project_name}\n"
             f"待撰写章节：{chapter.get('title','')}\n"
             f"章节要求：{chapter.get('description') or '（依据项目资料自行组织）'}\n"
-            f"{extra}\n"
+            f"{extra}{proj_ctx}{ins}\n"
             f"参考资料（直接引用其中的事实和数据，不要标注来源）：\n{context}\n"
             f"请直接输出该章节的正文内容，不要带任何标题，仿照政府实施方案的公文风格，"
             f"正文控制在 {lo}~{hi} 字之间。"
@@ -351,7 +373,9 @@ class LocalChat:
         raise RuntimeError("当前为离线模式（LLM_PROVIDER 不是 api），无法自动起草前言/摘要")
 
     def generate_chapter(self, *, chapter: Dict, project_name: str,
-                         citations: List[Dict], issues: Optional[List[str]] = None) -> str:
+                         citations: List[Dict], issues: Optional[List[str]] = None,
+                         project_context: Optional[str] = None,
+                         instruction: Optional[str] = None) -> str:
         """离线兜底：只返回纯正文（标题由调用方拼接），不带引用标注。"""
         req = (chapter.get("description") or "").strip()
         lines = []

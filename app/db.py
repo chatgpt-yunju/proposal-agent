@@ -65,6 +65,40 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_operations_project
                 ON operations(project_id, created_at);
+            -- 资料登记表：知识库导入的「逐文件状态」以此为准，向量库只存切块
+            CREATE TABLE IF NOT EXISTS kb_docs(
+                id TEXT PRIMARY KEY,
+                tier TEXT NOT NULL,
+                project_id TEXT DEFAULT '',
+                chapter_id TEXT DEFAULT '',
+                filename TEXT NOT NULL,
+                doc_type TEXT DEFAULT 'other',
+                status TEXT DEFAULT 'parsing',
+                error TEXT DEFAULT '',
+                fingerprint TEXT DEFAULT '',
+                chunk_count INTEGER DEFAULT 0,
+                chars INTEGER DEFAULT 0,
+                summary TEXT DEFAULT '',
+                path TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_kb_docs_project
+                ON kb_docs(project_id, created_at);
+            -- 章节来源：生成该章时实际用到的资料片段，供「依据」查看，不写进正文
+            CREATE TABLE IF NOT EXISTS chapter_sources(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chapter_id TEXT NOT NULL,
+                doc_id TEXT DEFAULT '',
+                source TEXT DEFAULT '',
+                title TEXT DEFAULT '',
+                text TEXT DEFAULT '',
+                score REAL DEFAULT 0,
+                page INTEGER,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_sources_chapter
+                ON chapter_sources(chapter_id);
             """
         )
         # 兼容旧表：老库的 operations 没有 file_path 列（后台导出产物的落盘路径）
@@ -89,6 +123,41 @@ def init_db() -> None:
             c.execute("ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0")
         # ALTER 只改默认值，已有行仍是 NULL，统一补成 0
         c.execute("UPDATE projects SET archived=0 WHERE archived IS NULL")
+        # 兼容旧表：项目需求档案（建设目标 / 现状痛点 / 范围 / 预算周期 / 硬性要求）
+        try:
+            c.execute("SELECT profile_json FROM projects LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE projects ADD COLUMN profile_json TEXT DEFAULT ''")
+        # 兼容旧表：需求整理结果（已知事实 / 建设要求 / 方案建议 / 待确认事项）
+        try:
+            c.execute("SELECT brief_json FROM projects LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE projects ADD COLUMN brief_json TEXT DEFAULT ''")
+        # 兼容旧表：大纲是否已人工确认（确认后才允许生成正文）
+        try:
+            c.execute("SELECT outline_confirmed FROM projects LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE projects ADD COLUMN outline_confirmed INTEGER DEFAULT 0")
+            # 只在新增列时回填一次：已有章节的老项目视为已确认，避免升级后被门禁卡住；
+            # 新项目建成后该列有值，不受影响，仍需显式确认。
+            c.execute(
+                "UPDATE projects SET outline_confirmed=1 "
+                "WHERE id IN (SELECT project_id FROM chapters)"
+            )
+        # 兼容旧表：单章重写前的原稿（支持恢复）
+        try:
+            c.execute("SELECT prev_content FROM chapters LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE chapters ADD COLUMN prev_content TEXT DEFAULT ''")
+        # 兼容旧表：章节生成状态（pending / generating / generated / failed）与失败原因
+        try:
+            c.execute("SELECT gen_status FROM chapters LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE chapters ADD COLUMN gen_status TEXT DEFAULT ''")
+        try:
+            c.execute("SELECT gen_error FROM chapters LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE chapters ADD COLUMN gen_error TEXT DEFAULT ''")
         c.commit()
         c.close()
 
@@ -422,3 +491,239 @@ def list_operations(project_id: Optional[str] = None, limit: int = 100) -> List[
             ).fetchall()
         c.close()
     return [dict(r) for r in rows]
+
+
+# ---------- 项目需求档案 / 需求整理 ----------
+_PROFILE_FIELDS = ("goal", "pain_points", "scope_in", "scope_out", "budget",
+                   "duration", "deploy_env", "requirements")
+
+
+def _json_or(raw: str, default):
+    import json as _json
+    if not raw:
+        return default
+    try:
+        val = _json.loads(raw)
+    except ValueError:
+        return default
+    return val if isinstance(val, type(default)) else default
+
+
+def get_project_profile(pid: str) -> dict:
+    """取项目需求档案；缺省字段一律给空串，便于前端直接绑定。"""
+    proj = get_project(pid) or {}
+    data = _json_or(proj.get("profile_json") or "", {})
+    out = {k: str(data.get(k) or "") for k in _PROFILE_FIELDS}
+    return out
+
+
+def update_project_profile(pid: str, patch: dict) -> dict:
+    """只写传入的字段，其余保持原值（用户分步填写时不会被清空）。"""
+    import json as _json
+    cur = get_project_profile(pid)
+    for k in _PROFILE_FIELDS:
+        if k in patch and patch[k] is not None:
+            cur[k] = str(patch[k])
+    with _lock:
+        c = _conn()
+        c.execute("UPDATE projects SET profile_json=? WHERE id=?",
+                  (_json.dumps(cur, ensure_ascii=False), pid))
+        c.commit()
+        c.close()
+    return cur
+
+
+def get_project_brief(pid: str) -> dict:
+    """取需求整理结果；结构固定为四类，前端按四类分组展示。"""
+    proj = get_project(pid) or {}
+    data = _json_or(proj.get("brief_json") or "", {})
+    out = {
+        "facts": list(data.get("facts") or []),
+        "requirements": list(data.get("requirements") or []),
+        "suggestions": list(data.get("suggestions") or []),
+        "pending": list(data.get("pending") or []),
+        "updated_at": str(data.get("updated_at") or ""),
+        "source": str(data.get("source") or ""),
+    }
+    return out
+
+
+def update_project_brief(pid: str, brief: dict) -> dict:
+    """保存需求整理结果（用户在页面上改完再存，刷新后按这份恢复）。"""
+    import json as _json
+    data = {
+        "facts": [str(x) for x in (brief.get("facts") or []) if str(x).strip()],
+        "requirements": [str(x) for x in (brief.get("requirements") or []) if str(x).strip()],
+        "suggestions": [str(x) for x in (brief.get("suggestions") or []) if str(x).strip()],
+        "pending": [str(x) for x in (brief.get("pending") or []) if str(x).strip()],
+        "updated_at": datetime_now(),
+        "source": str(brief.get("source") or ""),
+    }
+    with _lock:
+        c = _conn()
+        c.execute("UPDATE projects SET brief_json=? WHERE id=?",
+                  (_json.dumps(data, ensure_ascii=False), pid))
+        c.commit()
+        c.close()
+    return get_project_brief(pid)
+
+
+def datetime_now() -> str:
+    from datetime import datetime as _dt
+    return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_outline_confirmed(pid: str) -> bool:
+    proj = get_project(pid) or {}
+    return bool(int(proj.get("outline_confirmed") or 0))
+
+
+def set_outline_confirmed(pid: str, confirmed: bool = True) -> bool:
+    with _lock:
+        c = _conn()
+        c.execute("UPDATE projects SET outline_confirmed=? WHERE id=?",
+                  (1 if confirmed else 0, pid))
+        c.commit()
+        c.close()
+    return True
+
+
+# ---------- 资料登记（逐文件状态 / 去重 / 重试） ----------
+
+def add_kb_doc(doc_id: str, tier: str, filename: str, *, project_id: str = "",
+               chapter_id: str = "", doc_type: str = "other", fingerprint: str = "",
+               path: str = "", status: str = "parsing") -> dict:
+    with _lock:
+        c = _conn()
+        c.execute(
+            "INSERT INTO kb_docs(id,tier,project_id,chapter_id,filename,doc_type,"
+            "fingerprint,path,status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (doc_id, tier, project_id or "", chapter_id or "", filename, doc_type,
+             fingerprint, path, status),
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM kb_docs WHERE id=?", (doc_id,)).fetchone()
+        c.close()
+    return dict(row)
+
+
+def get_kb_doc(doc_id: str) -> Optional[dict]:
+    with _lock:
+        c = _conn()
+        row = c.execute("SELECT * FROM kb_docs WHERE id=?", (doc_id,)).fetchone()
+        c.close()
+    return dict(row) if row else None
+
+
+def update_kb_doc(doc_id: str, **fields) -> Optional[dict]:
+    allowed = {"status", "error", "chunk_count", "chars", "summary", "doc_type",
+               "filename", "path", "fingerprint"}
+    data = {k: v for k, v in fields.items() if k in allowed}
+    if not data:
+        return get_kb_doc(doc_id)
+    sets = ", ".join(f"{k}=?" for k in data)
+    args = list(data.values()) + [datetime_now(), doc_id]
+    with _lock:
+        c = _conn()
+        c.execute(f"UPDATE kb_docs SET {sets}, updated_at=? WHERE id=?", args)
+        c.commit()
+        row = c.execute("SELECT * FROM kb_docs WHERE id=?", (doc_id,)).fetchone()
+        c.close()
+    return dict(row) if row else None
+
+
+def list_kb_docs(project_id: Optional[str] = None) -> List[dict]:
+    """项目资料列表；project_id 为空时返回全局库资料。"""
+    with _lock:
+        c = _conn()
+        if project_id:
+            rows = c.execute(
+                "SELECT * FROM kb_docs WHERE project_id=? OR tier='global' "
+                "ORDER BY created_at DESC, rowid DESC", (project_id,)
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM kb_docs ORDER BY created_at DESC, rowid DESC"
+            ).fetchall()
+        c.close()
+    return [dict(r) for r in rows]
+
+
+def find_kb_doc_by_fingerprint(fingerprint: str, tier: str, project_id: str = "",
+                               chapter_id: str = "") -> Optional[dict]:
+    """同作用域内内容指纹相同即视为重复资料（同文件重复上传会命中）。"""
+    with _lock:
+        c = _conn()
+        row = c.execute(
+            "SELECT * FROM kb_docs WHERE fingerprint=? AND tier=? AND "
+            "COALESCE(project_id,'')=? AND COALESCE(chapter_id,'')=? "
+            "AND status IN ('ready','parsing') LIMIT 1",
+            (fingerprint, tier, project_id or "", chapter_id or ""),
+        ).fetchone()
+        c.close()
+    return dict(row) if row else None
+
+
+# ---------- 章节来源 / 原稿 ----------
+
+def set_chapter_sources(chapter_id: str, sources: List[dict]) -> int:
+    """整体替换某章的来源清单（重新生成时旧来源必须清掉，避免越攒越多）。
+
+    页码优先取显式 page 字段；没有就从「文件名:第N页」里解析，解析不到就留空——
+    宁可不显示定位，也不编造一个页码。
+    """
+    import re as _re
+    with _lock:
+        c = _conn()
+        c.execute("DELETE FROM chapter_sources WHERE chapter_id=?", (chapter_id,))
+        for s in sources or []:
+            page = s.get("page")
+            if page in (None, ""):
+                m = _re.search(r"第\s*(\d+)\s*页", s.get("source") or "")
+                page = int(m.group(1)) if m else None
+            c.execute(
+                "INSERT INTO chapter_sources(chapter_id,doc_id,source,title,text,score,page)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (chapter_id, s.get("doc_id") or "", s.get("source") or "",
+                 s.get("title") or "", (s.get("text") or "")[:600],
+                 float(s.get("score") or 0), page),
+            )
+        c.commit()
+        c.close()
+    return len(sources or [])
+
+
+def get_chapter_sources(chapter_id: str) -> List[dict]:
+    with _lock:
+        c = _conn()
+        rows = c.execute(
+            "SELECT doc_id,source,title,text,score,page FROM chapter_sources "
+            "WHERE chapter_id=? ORDER BY score DESC, id ASC", (chapter_id,)
+        ).fetchall()
+        c.close()
+    return [dict(r) for r in rows]
+
+
+def save_chapter_prev_content(chapter_id: str, prev: str) -> bool:
+    """重写前把原稿存档，前端可一键恢复。"""
+    with _lock:
+        c = _conn()
+        c.execute("UPDATE chapters SET prev_content=? WHERE id=?", (prev or "", chapter_id))
+        c.commit()
+        c.close()
+    return True
+
+
+def get_chapter_prev_content(chapter_id: str) -> str:
+    ch = get_chapter(chapter_id) or {}
+    return ch.get("prev_content") or ""
+
+
+def set_chapter_gen_status(chapter_id: str, status: str, error: str = "") -> bool:
+    with _lock:
+        c = _conn()
+        c.execute("UPDATE chapters SET gen_status=?, gen_error=? WHERE id=?",
+                  (status, (error or "")[:1000], chapter_id))
+        c.commit()
+        c.close()
+    return True
